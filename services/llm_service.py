@@ -1,0 +1,265 @@
+"""
+services/llm_service.py
+------------------------
+LLM answer generation for the Local Employee Knowledge Assistant.
+
+Responsibilities:
+  - Build a grounded prompt from retrieved chunks + user question
+  - Call Ollama LLM locally
+  - Return the generated answer as a string
+
+Swapping the LLM model:
+  Change LLM_MODEL in config.py — nothing here needs to change.
+
+  Supported local Ollama models:
+    qwen2.5:3b    (default — good quality, ~2GB RAM)
+    phi3:mini     (faster, slightly lower quality)
+    llama3.2:3b   (alternative)
+
+Design:
+  - One public function: generate_answer(question, chunks) -> str
+  - Prompt template is defined in config.py — not hardcoded here
+  - No streaming for POC — returns complete response
+  - No chat history — stateless single-turn Q&A
+"""
+
+import logging
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import LLM_MODEL, OLLAMA_BASE_URL, PROMPT_TEMPLATE
+
+logger = logging.getLogger(__name__)
+
+
+def _call_ollama(prompt: str) -> str:
+    """
+    Call the Ollama REST API directly using requests.
+
+    Why not LangChain OllamaLLM:
+      LangChain does not forward the `think` parameter to Ollama, so Qwen3
+      thinking models return 0-char responses (they emit only thinking tokens
+      and no answer text). Calling the API directly lets us pass think=false
+      explicitly, which tells Ollama to suppress the thinking phase entirely.
+
+    The think=false option is:
+      - Required for Qwen3 models (qwen3.5:0.8b, qwen3:*, etc.)
+      - Silently ignored by non-thinking models (qwen2.5, phi3, llama3, etc.)
+
+    Raises:
+        RuntimeError: If Ollama is unreachable or returns a non-200 status.
+    """
+    import requests
+    import json
+
+    payload = {
+        "model":  LLM_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 512,
+        },
+        "think": False,   # suppresses <think> blocks for Qwen3 models
+    }
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=120,   # CPU inference can be slow
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("response", "")
+
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {OLLAMA_BASE_URL}.\n"
+            "Run:  ollama serve"
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            "Ollama request timed out (>120s). "
+            "The model may be too large for available RAM."
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Ollama API error: {exc}\n"
+            f"Model: {LLM_MODEL}  |  URL: {OLLAMA_BASE_URL}"
+        )
+
+
+def _strip_thinking(text: str) -> str:
+    """
+    Remove <think>...</think> blocks from model output.
+
+    Qwen3 thinking models emit internal chain-of-thought wrapped in these tags.
+    We strip them so only the final answer is returned to the user.
+    Works even if think=False fails to suppress them (safety net).
+    """
+    import re
+    # Remove all <think>...</think> blocks including multiline
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return cleaned.strip()
+
+
+def build_prompt(question: str, chunks: list, history: list = None) -> str:
+    """
+    Construct the grounded prompt from retrieved chunks, optional conversation
+    history, and the user question.
+
+    Args:
+        question : The user's natural language question.
+        chunks   : List of chunk dicts from retrieval_service.retrieve().
+        history  : Optional list of previous messages for buffer memory.
+                   Format: [{"role": "user"/"assistant", "content": str}, ...]
+
+    Returns:
+        Formatted prompt string ready to send to the LLM.
+    """
+    if not chunks:
+        context = "No relevant context found in the uploaded documents."
+    else:
+        context_parts = []
+        for i, chunk in enumerate(chunks, start=1):
+            context_parts.append(
+                f"[Source {i}: {chunk['filename']}, chunk {chunk['chunk_number']}]\n"
+                f"{chunk['chunk_text']}"
+            )
+        context = "\n\n---\n\n".join(context_parts)
+
+    # Build conversation history block
+    history_block = ""
+    if history:
+        lines = []
+        for msg in history:
+            role_label = "User" if msg["role"] == "user" else "Assistant"
+            lines.append(f"{role_label}: {msg['content']}")
+        history_block = (
+            "\nConversation so far:\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
+    # Build prompt using config template, injecting history before context
+    from config import PROMPT_TEMPLATE
+
+    # Inject history block into the prompt before context
+    history_prefix = ""
+    if history_block:
+        history_prefix = history_block + "\n"
+
+    prompt = (
+        "You are a helpful assistant that answers questions using the provided context.\n\n"
+        "Guidelines:\n"
+        "- Use the context to answer even if information appears as a list or fragments.\n"
+        "- Synthesise and present the answer clearly in your own words.\n"
+        "- If context has partial information, use what is available.\n"
+        "- Only say you cannot find the answer if context has NO relevant information.\n"
+        + history_prefix
+        + "\nContext:\n"
+        + context
+        + "\n\nQuestion:\n"
+        + question
+        + "\n\nAnswer:"
+    )
+
+    return prompt
+
+
+def generate_answer(question: str, chunks: list, history: list = None) -> str:
+    """
+    Generate a grounded answer to the user's question from retrieved chunks.
+
+    Args:
+        question : The user's natural language question.
+        chunks   : Retrieved chunks from retrieval_service.retrieve().
+        history  : Optional conversation history for buffer memory context.
+                   Format: [{"role": "user"/"assistant", "content": str}, ...]
+
+    Returns:
+        The LLM answer as a plain string.
+
+    Raises:
+        RuntimeError: If Ollama is unreachable or the model is not loaded.
+    """
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty.")
+
+    prompt = build_prompt(question, chunks, history=history)
+
+    logger.info(
+        "Generating answer with model '%s' — prompt length: %d chars.",
+        LLM_MODEL, len(prompt),
+    )
+
+    try:
+        raw = _call_ollama(prompt)
+        answer = _strip_thinking(raw)
+
+        if not answer:
+            logger.warning(
+                "LLM returned empty answer after stripping thinking tags. "
+                "Raw response length: %d chars.", len(raw)
+            )
+            answer = "I could not generate an answer. Please try rephrasing your question."
+
+        logger.info("Answer generated successfully (%d chars).", len(answer))
+        return answer
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"LLM generation failed.\n"
+            f"  Model      : {LLM_MODEL}\n"
+            f"  Ollama URL : {OLLAMA_BASE_URL}\n"
+            f"  Error      : {exc}\n\n"
+            f"  Is Ollama running?  →  ollama serve\n"
+            f"  Is model pulled?    →  ollama pull {LLM_MODEL}"
+        ) from exc
+
+
+def check_llm_connection() -> dict:
+    """
+    Verify Ollama is reachable and the configured LLM model is available.
+
+    Returns a dict with:
+        reachable   : bool
+        model_ready : bool
+        model_name  : str
+        error       : str or None
+    """
+    import requests
+
+    result = {
+        "reachable":   False,
+        "model_ready": False,
+        "model_name":  LLM_MODEL,
+        "error":       None,
+    }
+
+    try:
+        resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        resp.raise_for_status()
+        result["reachable"] = True
+
+        models = [m["name"] for m in resp.json().get("models", [])]
+        result["model_ready"] = any(LLM_MODEL in m for m in models)
+
+        if not result["model_ready"]:
+            result["error"] = (
+                f"Model '{LLM_MODEL}' not found in Ollama.\n"
+                f"Run:  ollama pull {LLM_MODEL}"
+            )
+
+    except requests.exceptions.ConnectionError:
+        result["error"] = (
+            f"Cannot reach Ollama at {OLLAMA_BASE_URL}.\n"
+            "Run:  ollama serve"
+        )
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result

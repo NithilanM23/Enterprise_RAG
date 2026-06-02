@@ -1,0 +1,38 @@
+# ============================================================
+# Local Employee Knowledge Assistant — Python Dependencies
+# ============================================================
+# Install with:
+#   pip install -r requirements.txt
+#
+# Pinning strategy:
+#   - Hard pin only stable, slow-moving packages (psycopg2, pypdf, streamlit)
+#   - Let pip resolve langchain family versions freely within the 0.3.x band
+#     to avoid inter-package conflicts (they release in lockstep)
+# ============================================================
+
+# --- Database ---
+psycopg2-binary==2.9.9
+pgvector==0.3.2
+
+# --- Document Loading (Phase 2) ---
+langchain>=0.3.0,<0.4.0
+langchain-community>=0.3.0,<0.4.0
+pypdf==4.3.1
+unstructured[pptx]==0.15.13
+python-pptx==1.0.2
+
+# --- Embeddings + LLM via Ollama (Phase 3 & 4) ---
+langchain-ollama>=0.2.0,<0.3.0
+
+# --- UI (Phase 5) ---
+streamlit==1.38.0
+
+rank-bm25==0.2.2           
+ 
+# --- Reranker ---
+sentence-transformers==3.3.1  # Cross-encoder reranking (downloads ~80MB model on first run)
+
+
+# --- Utilities ---
+python-dotenv==1.0.1
+python-docx==1.1.2              
