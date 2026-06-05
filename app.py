@@ -168,51 +168,113 @@ def switch_session(session_id: int):
 # ---------------------------------------------------------------------------
 
 def do_ask(question: str, history: list, document_ids=None):
+    """
+    Full answer pipeline — routes to the correct handler:
+      1. Metadata question   → metadata_service (instant, no RAG)
+      2. Excel lookup        → excel_service row search
+      3. Excel aggregation   → excel_service text-to-SQL
+      4. Everything else     → hybrid RAG pipeline
+    """
+    from services.metadata_service import is_metadata_question, answer_metadata_question
+    from services.excel_service import detect_excel_intent, search_rows, answer_aggregation
+    from services.database_service import _get_connection, get_all_documents
+
+    # --- Check if any Excel files are in scope ---
+    try:
+        import psycopg2.extras
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                if document_ids:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM excel_rows WHERE document_id = ANY(%s);",
+                        (document_ids,)
+                    )
+                else:
+                    cur.execute("SELECT COUNT(*) FROM excel_rows;")
+                excel_row_count = cur.fetchone()[0]
+    except Exception:
+        excel_row_count = 0
+
+    # --- Route: metadata question ---
+    if is_metadata_question(question):
+        result = answer_metadata_question(question)
+        if result["answered"]:
+            return result["response"], [], {"type": "metadata", "data": result["data"]}
+
+    # --- Route: Excel question (if Excel data exists) ---
+    if excel_row_count > 0:
+        intent = detect_excel_intent(question)
+
+        if intent == "lookup":
+            rows = search_rows(question, document_ids=document_ids, top_k=20)
+            if rows:
+                return "", rows, {"type": "excel_rows"}
+
+        elif intent == "aggregation":
+            result = answer_aggregation(question)
+            if result["answered"]:
+                return result["response"], result["result_rows"], {
+                    "type": "excel_aggregation",
+                    "sql": result.get("sql", "")
+                }
+
+    # --- Route: RAG pipeline (default) ---
     from services.retrieval_service import retrieve
     from services.llm_service import generate_answer
     try:
         chunks = retrieve(question, document_ids=document_ids)
         if not chunks:
-            return "I could not find this information in the uploaded documents.", []
+            return "I could not find this information in the uploaded documents.", [], {}
         answer = generate_answer(question, chunks, history=history)
-        return answer, chunks
+        return answer, chunks, {"type": "rag"}
     except Exception as exc:
-        return f"Error: {exc}", []
+        return f"Error: {exc}", [], {}
 
 def do_ingest(uploaded_file, category="general"):
     from services.loader import load_document
     from services.chunker import chunk_text
     from services.database_service import insert_document, insert_embeddings, delete_document
-    from services.database_service import get_document_by_filename
-    from config import UPLOAD_DIR
+    from services.metadata_service import extract_metadata
+    from config import UPLOAD_DIR, EXCEL_EXTENSIONS
 
     dest_path = UPLOAD_DIR / uploaded_file.name
+    ext       = uploaded_file.name.lower().rsplit(".", 1)[-1]
+
     if dest_path.exists():
         return False, f"'{uploaded_file.name}' already exists. Delete it first.", 0
 
-    # Save file to disk
     with open(dest_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
     doc_id = None
     try:
-        # Step 1 — extract text
-        text = load_document(str(dest_path))
-
-        # Step 2 — chunk
-        chunks = chunk_text(text)
-
-        # Step 3 — insert document row
+        # Insert document row first
         doc_id = insert_document(
             filename=uploaded_file.name,
             filepath=str(dest_path.resolve()),
             category=category,
         )
 
-        # Step 4 — insert chunks (embedding=None, filled in Phase 3)
+        # Always extract metadata for all formats
+        extract_metadata(str(dest_path.resolve()), doc_id)
+
+        # Excel → store rows, skip RAG chunking
+        if f".{ext}" in EXCEL_EXTENSIONS:
+            from services.excel_service import ingest_excel
+            info = ingest_excel(str(dest_path.resolve()), doc_id)
+            return (
+                True,
+                f"Excel ingested: {info['sheet_count']} sheet(s), "
+                f"{info['total_rows']} rows stored. "
+                f"Ready for lookup and aggregation queries.",
+                info["total_rows"],
+            )
+
+        # All other formats → RAG pipeline
+        text   = load_document(str(dest_path))
+        chunks = chunk_text(text)
         insert_embeddings(document_id=doc_id, chunks=chunks)
 
-        # Step 5 — rebuild BM25 index (best-effort, non-fatal)
         try:
             from services.bm25_service import build_index
             build_index()
@@ -222,7 +284,6 @@ def do_ingest(uploaded_file, category="general"):
         return True, f"Ingested '{uploaded_file.name}' → {len(chunks)} chunks stored.", len(chunks)
 
     except Exception as exc:
-        # Clean up: remove file and document row so state stays consistent
         dest_path.unlink(missing_ok=True)
         if doc_id is not None:
             try:
@@ -306,7 +367,7 @@ with st.sidebar:
     # Navigation
     st.markdown("**Navigation**")
     page = st.radio(
-        "page", ["💬 Chat", "📂 My Documents", "⬆️ Upload"],
+        "page", ["💬 Chat", "📊 Data Explorer", "📂 My Documents", "⬆️ Upload"],
         label_visibility="collapsed"
     )
 
@@ -442,32 +503,256 @@ if page == "💬 Chat":
         if send and question.strip():
             q = question.strip()
 
-            # Get history buffer for context
             history = get_history_buffer(session_id)
-
-            # Save user message
             add_message(session_id, "user", q)
 
-            # Auto-title session on first message
             if not messages:
                 auto_title_session(session_id, q)
 
-            # Run RAG pipeline
             with st.spinner("Thinking..."):
-                answer, chunks = do_ask(q, history, document_ids=selected_doc_ids)
+                answer, data, meta = do_ask(q, history, document_ids=selected_doc_ids)
 
-            # Save assistant message with sources
-            add_message(session_id, "assistant", answer, sources=chunks)
+            answer_type = meta.get("type", "rag") if meta else "rag"
 
-            # Show routing info if available
-            if chunks:
-                routing = chunks[0].get("routing", {})
-                if routing.get("routed"):
-                    from services.router_service import get_category_description
-                    cat = get_category_description(routing["category"])
-                    st.caption(f"Auto-routed → {cat} (confidence: {routing['confidence']:.1f})")
+            if answer_type == "metadata":
+                # Metadata answer — plain text
+                add_message(session_id, "assistant", answer)
+
+            elif answer_type == "excel_rows":
+                # Excel row lookup — show as table
+                if data:
+                    import json
+                    rows_display = [
+                        r["row_data"] if isinstance(r["row_data"], dict)
+                        else json.loads(r["row_data"])
+                        for r in data
+                    ]
+                    summary = (
+                        f"Found {len(data)} matching row(s) across "
+                        f"{len(set(r['sheet_name'] for r in data))} sheet(s)."
+                    )
+                    add_message(session_id, "assistant", summary)
+                else:
+                    add_message(session_id, "assistant",
+                                "No matching rows found in the Excel files.")
+
+            elif answer_type == "excel_aggregation":
+                add_message(session_id, "assistant", answer or "Aggregation complete.")
+
+            else:
+                # RAG answer
+                add_message(session_id, "assistant", answer,
+                            sources=data if data else None)
+                if data:
+                    routing = data[0].get("routing", {})
+                    if routing.get("routed"):
+                        from services.router_service import get_category_description
+                        cat = get_category_description(routing["category"])
+                        st.caption(
+                            f"Auto-routed → {cat} "
+                            f"(confidence: {routing['confidence']:.1f})"
+                        )
+
+            # Show Excel table result inline (before rerun)
+            if answer_type == "excel_rows" and data:
+                import json
+                rows_display = []
+                for r in data:
+                    rd = r["row_data"] if isinstance(r["row_data"], dict)                          else json.loads(r["row_data"])
+                    rd["_sheet"] = r["sheet_name"]
+                    rd["_file"]  = r.get("filename", "")
+                    rows_display.append(rd)
+                st.dataframe(rows_display, use_container_width=True)
 
             st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# PAGE: DATA EXPLORER
+# ---------------------------------------------------------------------------
+
+elif page == "📊 Data Explorer":
+    st.markdown("## 📊 Data Explorer")
+    st.markdown("Upload any CSV or Excel file and explore it with natural language — no embeddings needed.")
+    st.markdown("---")
+
+    # File uploader
+    exp_file = st.file_uploader(
+        "Upload CSV or Excel for exploration",
+        type=["csv", "xlsx", "xls"],
+        key="explorer_upload",
+        help="This file is used for this session only — not stored in the knowledge base"
+    )
+
+    if exp_file:
+        from services.data_explorer_service import (
+            load_file, build_schema_context, answer_query
+        )
+
+        # Load file into session state (reload only when file changes)
+        if (st.session_state.get("explorer_filename") != exp_file.name
+                or "explorer_df" not in st.session_state):
+            df, load_err = load_file(exp_file, exp_file.name)
+            if load_err:
+                st.error(f"❌ {load_err}")
+                st.stop()
+            st.session_state["explorer_df"]       = df
+            st.session_state["explorer_filename"]  = exp_file.name
+            st.session_state["explorer_schema"]    = build_schema_context(df, exp_file.name)
+            st.session_state["explorer_history"]   = []
+            st.success(f"✅ Loaded **{exp_file.name}** — {df.shape[0]} rows × {df.shape[1]} columns")
+
+        df            = st.session_state["explorer_df"]
+        schema_ctx    = st.session_state["explorer_schema"]
+        history       = st.session_state.get("explorer_history", [])
+
+        # Schema preview
+        with st.expander("📋 Data Preview & Schema", expanded=False):
+            tab1, tab2, tab3 = st.tabs(["Preview", "Schema", "Statistics"])
+            with tab1:
+                st.dataframe(df.head(10), use_container_width=True)
+            with tab2:
+                import pandas as pd
+                schema_df = pd.DataFrame({
+                    "Column":    df.columns,
+                    "Type":      [str(df[c].dtype) for c in df.columns],
+                    "Non-Null":  [df[c].count() for c in df.columns],
+                    "Unique":    [df[c].nunique() for c in df.columns],
+                    "Null %":    [round(df[c].isnull().mean() * 100, 1) for c in df.columns],
+                })
+                st.dataframe(schema_df, use_container_width=True)
+            with tab3:
+                st.dataframe(df.describe(include="all"), use_container_width=True)
+
+        st.markdown("---")
+
+        # Render history
+        for item in history:
+            # User query
+            st.markdown(f'<div class="role-label-user">You</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="user-bubble">{item["query"]}</div>', unsafe_allow_html=True)
+
+            # Assistant result
+            st.markdown(f'<div class="role-label-assistant">Explorer ({item["mode"]})</div>',
+                        unsafe_allow_html=True)
+
+            if item.get("error") and item["error"] != "BLOCKED":
+                st.error(f"❌ {item['error']}")
+            elif item["result_type"] == "image" and item.get("image_bytes"):
+                st.image(item["image_bytes"], use_container_width=True)
+            elif item["result_type"] == "dataframe":
+                st.dataframe(item["result"], use_container_width=True)
+            elif item["result_type"] in ("text", "list", "series"):
+                st.markdown(
+                    f'<div class="assistant-bubble">{str(item["result"])}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f'<div class="assistant-bubble">{str(item.get("result", "Done."))}</div>',
+                    unsafe_allow_html=True
+                )
+
+            # Show generated code (collapsible)
+            if item.get("code") and item["mode"] != "statistical":
+                with st.expander("🔍 Generated code", expanded=False):
+                    st.code(item["code"], language="python")
+                if item.get("retried"):
+                    st.caption("⟳ Retried once after initial error.")
+
+        st.markdown("---")
+
+        # Query input
+        col_q, col_btn, col_clr = st.columns([5, 1, 1])
+        with col_q:
+            exp_query = st.text_input(
+                "Ask anything about the data",
+                placeholder='e.g. "show top 10 by sales", "plot a bar chart", "how many nulls?"',
+                key="explorer_query",
+                label_visibility="collapsed",
+            )
+        with col_btn:
+            run_btn = st.button("Run →", type="primary", use_container_width=True)
+        with col_clr:
+            if st.button("🗑 Clear", use_container_width=True):
+                st.session_state["explorer_history"] = []
+                st.rerun()
+
+        if run_btn and exp_query.strip():
+            with st.spinner("Analysing..."):
+                result_dict = answer_query(
+                    exp_query.strip(), df, schema_ctx, exp_file.name
+                )
+
+            # Append to history
+            history.append({
+                "query":       exp_query.strip(),
+                "mode":        result_dict["mode"],
+                "result":      result_dict["result"],
+                "result_type": result_dict["result_type"],
+                "code":        result_dict.get("code"),
+                "image_bytes": result_dict.get("image_bytes"),
+                "error":       result_dict.get("error"),
+                "retried":     result_dict.get("retried", False),
+            })
+            st.session_state["explorer_history"] = history
+            st.rerun()
+
+        # Quick query chips
+        st.markdown("**Quick queries:**")
+        chips = [
+            "Describe the data", "Show first 10 rows",
+            "How many null values?", "Show correlation matrix",
+            "Value counts for each column", "Show data types",
+        ]
+        chip_cols = st.columns(3)
+        for i, chip in enumerate(chips):
+            with chip_cols[i % 3]:
+                if st.button(chip, key=f"chip_{i}", use_container_width=True):
+                    with st.spinner("Analysing..."):
+                        result_dict = answer_query(chip, df, schema_ctx, exp_file.name)
+                    history.append({
+                        "query":       chip,
+                        "mode":        result_dict["mode"],
+                        "result":      result_dict["result"],
+                        "result_type": result_dict["result_type"],
+                        "code":        result_dict.get("code"),
+                        "image_bytes": result_dict.get("image_bytes"),
+                        "error":       result_dict.get("error"),
+                        "retried":     result_dict.get("retried", False),
+                    })
+                    st.session_state["explorer_history"] = history
+                    st.rerun()
+
+    else:
+        # No file uploaded yet — show instructions
+        st.markdown("### How to use the Data Explorer")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**📤 Upload**")
+            st.markdown("Upload any CSV or Excel file above. It stays in your session only.")
+        with col2:
+            st.markdown("**💬 Ask**")
+            st.markdown("Type questions in plain English. Describe, filter, aggregate, chart.")
+        with col3:
+            st.markdown("**🔍 Inspect**")
+            st.markdown("See the generated pandas code for every answer — full transparency.")
+
+        st.markdown("---")
+        st.markdown("**Example queries you can ask:**")
+        examples = [
+            ("Statistical", "How many null values are there?", "Instant — no LLM needed"),
+            ("Statistical", "Show me the correlation matrix", "Instant — no LLM needed"),
+            ("Statistical", "What are the unique values in Status?", "Instant — no LLM needed"),
+            ("Code", "Show me all rows where Amount > 5000", "LLM generates pandas filter"),
+            ("Code", "Group by Category and show total sales", "LLM generates groupby code"),
+            ("Code", "Find the top 5 customers by revenue", "LLM generates sort + head"),
+            ("Visualization", "Plot a bar chart of sales by region", "LLM generates matplotlib"),
+            ("Visualization", "Show a histogram of Amount column", "LLM generates histogram"),
+        ]
+        import pandas as pd
+        ex_df = pd.DataFrame(examples, columns=["Mode", "Query", "How it works"])
+        st.dataframe(ex_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
 # PAGE: MY DOCUMENTS
@@ -512,7 +797,36 @@ elif page == "📂 My Documents":
                     unsafe_allow_html=True
                 )
             with c2:
-                st.markdown(f"<small style='color:#555'>ID: {doc['id']}</small>", unsafe_allow_html=True)
+                # Show row count for Excel docs, chunk count for RAG docs
+                try:
+                    import psycopg2
+                    from services.database_service import _get_connection
+                    with _get_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT COUNT(*) FROM excel_rows WHERE document_id = %s;",
+                                (doc["id"],)
+                            )
+                            excel_rows = cur.fetchone()[0]
+                    if excel_rows > 0:
+                        st.markdown(
+                            f"<small style='color:#555'>{excel_rows} rows (Excel)</small>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        with _get_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "SELECT COUNT(*) FROM embeddings WHERE document_id = %s;",
+                                    (doc["id"],)
+                                )
+                                chunk_count = cur.fetchone()[0]
+                        st.markdown(
+                            f"<small style='color:#555'>{chunk_count} chunks</small>",
+                            unsafe_allow_html=True
+                        )
+                except Exception:
+                    st.markdown(f"<small style='color:#555'>ID: {doc['id']}</small>", unsafe_allow_html=True)
             with c3:
                 if st.button("🗑", key=f"del_doc_{doc['id']}", help=f"Delete {doc['filename']}"):
                     ok, msg = do_delete_doc(doc["id"], doc["filename"])
@@ -534,7 +848,7 @@ elif page == "⬆️ Upload":
 
     uploaded_files = st.file_uploader(
         "Choose files",
-        type=["pdf", "txt", "pptx", "ppt", "docx"],
+        type=["pdf", "txt", "pptx", "ppt", "docx", "xlsx", "xls"],
         accept_multiple_files=True,
     )
 
@@ -568,10 +882,13 @@ elif page == "⬆️ Upload":
     st.markdown("---")
     st.markdown("**Supported formats**")
     st.markdown("""
-| Format | Notes |
-|--------|-------|
-| PDF    | Text-based only (no scanned/image PDFs) |
-| TXT    | UTF-8 or auto-detected encoding |
-| PPTX / PPT | Text slides only |
-| DOCX   | Paragraphs and table text |
+| Format | Type | Notes |
+|--------|------|-------|
+| PDF    | RAG  | Text-based only (no scanned/image PDFs) |
+| TXT    | RAG  | UTF-8 or auto-detected encoding |
+| PPTX / PPT | RAG | Text slides only |
+| DOCX   | RAG  | Paragraphs and table text |
+| XLSX / XLS | **Tabular** | Row-level storage — supports lookup, aggregation, metadata queries |
 """)
+
+    st.info("Excel files are stored differently — each row is indexed for lookup and aggregation. Ask: Is order 1042 in the sheet? / How many pending invoices? / What columns are in the sales file?")

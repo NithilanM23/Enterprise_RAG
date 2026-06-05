@@ -36,3 +36,7 @@ sentence-transformers==3.3.1  # Cross-encoder reranking (downloads ~80MB model o
 # --- Utilities ---
 python-dotenv==1.0.1
 python-docx==1.1.2              
+
+# --- Excel support ---
+openpyxl==3.1.5              # .xlsx read/write
+xlrd==2.0.1                  # .xls legacy format support

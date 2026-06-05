@@ -97,43 +97,72 @@ def ingest_document(filepath: str, category: str = "general") -> None:
     shutil.copy2(filepath, dest_path)
     print(f"\n  [1/4] Copied to uploads folder.")
 
-    print(f"  [2/4] Extracting text...")
-    try:
-        text = load_document(str(dest_path))
-        print(f"        ✓ Extracted {len(text):,} characters.")
-    except Exception as exc:
-        print(f"        ✗ Text extraction failed: {exc}")
-        dest_path.unlink(missing_ok=True)
-        return
+    from config import EXCEL_EXTENSIONS
+    from services.metadata_service import extract_metadata
 
-    print(f"  [3/4] Chunking text...")
-    try:
-        chunks = chunk_text(text)
-        print(f"        ✓ Created {len(chunks)} chunks.")
-    except Exception as exc:
-        print(f"        ✗ Chunking failed: {exc}")
-        dest_path.unlink(missing_ok=True)
-        return
-
-    print(f"  [4/4] Storing in database...")
+    # Insert document row first
+    doc_id = None
     try:
         doc_id = insert_document(
             filename=filepath.name,
             filepath=str(dest_path.resolve()),
             category=category,
         )
-        insert_embeddings(document_id=doc_id, chunks=chunks)
-        print(f"        ✓ Stored document (id={doc_id}) with {len(chunks)} chunks.")
     except ValueError as exc:
-        print(f"        ✗ {exc}")
-        dest_path.unlink(missing_ok=True)
-        return
-    except Exception as exc:
-        print(f"        ✗ Database storage failed: {exc}")
+        print(f"        \u2717 {exc}")
         dest_path.unlink(missing_ok=True)
         return
 
-    print(f"\n  ✓ '{filepath.name}' ingested successfully.")
+    # Always extract metadata
+    print(f"  [2/4] Extracting metadata...")
+    try:
+        meta = extract_metadata(str(dest_path.resolve()), doc_id)
+        print(f"        \u2713 {len(meta)} metadata fields stored.")
+    except Exception as exc:
+        print(f"        \u26a0  Metadata extraction failed (non-fatal): {exc}")
+
+    # Excel files -> row storage
+    if dest_path.suffix.lower() in EXCEL_EXTENSIONS:
+        from services.excel_service import ingest_excel
+        print(f"  [3/4] Ingesting Excel rows...")
+        try:
+            info = ingest_excel(str(dest_path.resolve()), doc_id)
+            print(f"        \u2713 {info['sheet_count']} sheet(s), {info['total_rows']} rows stored.")
+            print(f"\n  \u2713 '{filepath.name}' ingested (Excel).")
+            print(f"    Rows     : {info['total_rows']}")
+            print(f"    Category : {category}\n")
+        except Exception as exc:
+            print(f"        \u2717 Excel ingestion failed: {exc}")
+            dest_path.unlink(missing_ok=True)
+            from services.database_service import delete_document
+            delete_document(doc_id)
+        return
+
+    # All other formats -> RAG pipeline
+    print(f"  [3/4] Extracting text + chunking...")
+    try:
+        text   = load_document(str(dest_path))
+        chunks = chunk_text(text)
+        print(f"        \u2713 Created {len(chunks)} chunks.")
+    except Exception as exc:
+        print(f"        \u2717 Extraction/chunking failed: {exc}")
+        dest_path.unlink(missing_ok=True)
+        from services.database_service import delete_document
+        delete_document(doc_id)
+        return
+
+    print(f"  [4/4] Storing chunks in database...")
+    try:
+        insert_embeddings(document_id=doc_id, chunks=chunks)
+        print(f"        \u2713 Stored {len(chunks)} chunks.")
+    except Exception as exc:
+        print(f"        \u2717 Database storage failed: {exc}")
+        dest_path.unlink(missing_ok=True)
+        from services.database_service import delete_document
+        delete_document(doc_id)
+        return
+
+    print(f"\n  \u2713 '{filepath.name}' ingested successfully.")
     print(f"    Document ID : {doc_id}")
     print(f"    Chunks      : {len(chunks)}")
     print(f"    Category    : {category}")

@@ -90,6 +90,8 @@ TOP_K = int(os.getenv("TOP_K", "5"))   # Number of chunks returned per query
 # ---------------------------------------------------------------------------
 
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".ppt", ".pptx", ".docx"}
+EXCEL_EXTENSIONS     = {".xlsx", ".xls"}
+
 
 # ---------------------------------------------------------------------------
 # Prompt Template
