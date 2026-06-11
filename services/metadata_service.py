@@ -182,10 +182,15 @@ def _extract_txt_metadata(filepath: str) -> dict:
 def _extract_excel_metadata(filepath: str) -> dict:
     """
     Extract sheet names, row counts, and column names from an Excel file.
-    Returns multiple metadata keys — one per sheet for rows and columns.
+    Reads into BytesIO first to avoid Windows file-lock issues.
     """
-    import openpyxl
-    wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+    import io, openpyxl
+
+    # Read to memory first — releases OS file handle immediately
+    with open(filepath, "rb") as f:
+        data = io.BytesIO(f.read())
+
+    wb = openpyxl.load_workbook(data, read_only=True, data_only=True)
 
     metadata     = {}
     sheet_names  = wb.sheetnames
@@ -205,7 +210,13 @@ def _extract_excel_metadata(filepath: str) -> dict:
         metadata[f"sheet_{safe_name}_columns"] = ", ".join(h for h in headers if h)
         metadata[f"sheet_{safe_name}_row_count"] = str(data_rows)
 
-    wb.close()
+    try:
+        wb.close()
+    except Exception:
+        pass
+    finally:
+        import gc
+        gc.collect()
     return metadata
 
 

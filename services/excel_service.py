@@ -73,22 +73,37 @@ def ensure_excel_table() -> None:
 # Ingestion
 # ---------------------------------------------------------------------------
 
-def ingest_excel(filepath: str, document_id: int) -> dict:
+def ingest_excel(source, document_id: int, filename: str = "") -> dict:
     """
     Load an Excel file and store all rows in the excel_rows table.
 
     Args:
-        filepath    : Path to the .xlsx or .xls file.
+        source      : BytesIO object OR filepath string.
+                      BytesIO is preferred on Windows to avoid file-lock issues.
         document_id : The document's DB row ID.
+        filename    : Original filename (for logging).
 
     Returns:
         dict with sheet_count, total_rows, sheets (list of sheet summaries)
     """
+    import io
     import openpyxl
     import psycopg2.extras
     from services.database_service import _get_connection
 
-    wb    = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+    # Safety net — create table if it doesn't exist yet
+    # (handles cases where cache_resource skipped initialize_database)
+    ensure_excel_table()
+
+    # Always work from BytesIO — avoids Windows file handle leaks
+    if isinstance(source, (str, bytes.__class__)) and not isinstance(source, io.IOBase):
+        with open(source, "rb") as f:
+            data = f.read()
+        source = io.BytesIO(data)
+    elif hasattr(source, "seek"):
+        source.seek(0)
+
+    wb = openpyxl.load_workbook(source, read_only=True, data_only=True)
     total = 0
     sheets_summary = []
 
@@ -147,7 +162,13 @@ def ingest_excel(filepath: str, document_id: int) -> dict:
                     "row_count":  sheet_row_count,
                 })
 
-    wb.close()
+    try:
+        wb.close()
+    except Exception:
+        pass
+    finally:
+        import gc
+        gc.collect()   # release any lingering Windows handles
 
     logger.info(
         "Excel ingested: %d sheets, %d rows stored for document_id=%d.",
@@ -178,79 +199,153 @@ def search_rows(
     top_k: int = 20,
 ) -> list:
     """
-    Search Excel rows by keyword using PostgreSQL full-text search.
+    Search Excel rows using a 3-tier strategy:
+      Tier 1: plainto_tsquery  — phrase-based full-text search (lenient, no &-joining)
+      Tier 2: ILIKE per term  — partial substring match on row_text
+      Tier 3: show all rows   — when query is broad ("show all", "list all", "all rows")
 
-    Args:
-        query        : The user's natural language question.
-        document_ids : Optional list of document IDs to restrict search.
-        top_k        : Maximum rows to return.
-
-    Returns:
-        List of dicts: {document_id, sheet_name, row_number, row_data, row_text, rank}
+    plainto_tsquery is used instead of to_tsquery because:
+      - to_tsquery with & requires ALL terms to match → too strict
+      - plainto_tsquery treats terms as OR/proximity → much more forgiving
+      - Handles stemming: "cars" matches "car", "Toyota" matches "toyota"
     """
     import psycopg2.extras
     from services.database_service import _get_connection
 
-    # Extract search terms — strip common words
+    q_lower = query.lower()
+
+    # Tier 3: broad "show everything" queries
+    if any(p in q_lower for p in ["show all", "list all", "all rows",
+                                   "display all", "show me all", "get all",
+                                   "show everything", "all data", "full data"]):
+        return _get_all_rows(document_ids, top_k)
+
+    # Extract meaningful terms
     search_terms = _extract_search_terms(query)
     if not search_terms:
-        return []
+        # No meaningful terms — return sample rows so user sees the data
+        return _get_all_rows(document_ids, min(top_k, 10))
 
-    ts_query = " & ".join(search_terms)
-
-    if document_ids:
-        sql = """
-            SELECT
-                e.id, e.document_id, e.sheet_name, e.row_number,
-                e.row_data, e.row_text,
-                d.filename,
-                ts_rank(to_tsvector('english', e.row_text),
-                        to_tsquery('english', %s)) AS rank
-            FROM excel_rows e
-            JOIN documents d ON d.id = e.document_id
-            WHERE e.document_id = ANY(%s)
-              AND to_tsvector('english', e.row_text) @@ to_tsquery('english', %s)
-            ORDER BY rank DESC
-            LIMIT %s;
-        """
-        params = (ts_query, document_ids, ts_query, top_k)
-    else:
-        sql = """
-            SELECT
-                e.id, e.document_id, e.sheet_name, e.row_number,
-                e.row_data, e.row_text,
-                d.filename,
-                ts_rank(to_tsvector('english', e.row_text),
-                        to_tsquery('english', %s)) AS rank
-            FROM excel_rows e
-            JOIN documents d ON d.id = e.document_id
-            WHERE to_tsvector('english', e.row_text) @@ to_tsquery('english', %s)
-            ORDER BY rank DESC
-            LIMIT %s;
-        """
-        params = (ts_query, ts_query, top_k)
+    # Tier 1: plainto_tsquery (phrase-based, lenient)
+    phrase = " ".join(search_terms)
 
     try:
-        with _get_connection() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
+        results = _fts_search(phrase, document_ids, top_k)
+        if results:
+            logger.info("FTS search: '%s' → %d rows.", query[:60], len(results))
+            return results
+    except Exception as exc:
+        logger.warning("FTS search failed: %s", exc)
 
-        results = []
-        for r in rows:
-            row = dict(r)
-            if isinstance(row["row_data"], str):
-                row["row_data"] = json.loads(row["row_data"])
-            results.append(row)
-
-        logger.info(
-            "Excel row search: '%s' → %d rows found.", query[:60], len(results)
-        )
+    # Tier 2: ILIKE per term (substring match, most permissive)
+    results = _ilike_search(search_terms, document_ids, top_k)
+    if results:
+        logger.info("ILIKE search: '%s' → %d rows.", query[:60], len(results))
         return results
 
-    except Exception as exc:
-        logger.warning("Excel full-text search failed: %s. Trying fallback.", exc)
-        return _fallback_search(query, document_ids, top_k)
+    logger.info("No rows found for query: '%s'", query[:60])
+    return []
+
+
+def _fts_search(phrase: str, document_ids: list, top_k: int) -> list:
+    """Full-text search using plainto_tsquery."""
+    import psycopg2.extras
+    from services.database_service import _get_connection
+
+    scope = "AND e.document_id = ANY(%(doc_ids)s)" if document_ids else ""
+    sql = f"""
+        SELECT
+            e.id, e.document_id, e.sheet_name, e.row_number,
+            e.row_data, e.row_text, d.filename,
+            ts_rank(to_tsvector('english', e.row_text),
+                    plainto_tsquery('english', %(phrase)s)) AS rank
+        FROM excel_rows e
+        JOIN documents d ON d.id = e.document_id
+        WHERE to_tsvector('english', e.row_text) @@ plainto_tsquery('english', %(phrase)s)
+        {scope}
+        ORDER BY rank DESC
+        LIMIT %(top_k)s;
+    """
+    params = {"phrase": phrase, "top_k": top_k}
+    if document_ids:
+        params["doc_ids"] = document_ids
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return _parse_rows(rows)
+
+
+def _ilike_search(terms: list, document_ids: list, top_k: int) -> list:
+    """Substring search using ILIKE — catches what FTS misses."""
+    import psycopg2.extras
+    from services.database_service import _get_connection
+
+    # Build OR conditions for each term
+    conditions = " OR ".join([f"e.row_text ILIKE %(t{i})s" for i in range(len(terms))])
+    scope      = "AND e.document_id = ANY(%(doc_ids)s)" if document_ids else ""
+
+    sql = f"""
+        SELECT e.id, e.document_id, e.sheet_name, e.row_number,
+               e.row_data, e.row_text, d.filename, 1.0 AS rank
+        FROM excel_rows e
+        JOIN documents d ON d.id = e.document_id
+        WHERE ({conditions}) {scope}
+        LIMIT %(top_k)s;
+    """
+    params = {f"t{i}": f"%{t}%" for i, t in enumerate(terms)}
+    params["top_k"] = top_k
+    if document_ids:
+        params["doc_ids"] = document_ids
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return _parse_rows(rows)
+
+
+def _get_all_rows(document_ids: list, top_k: int) -> list:
+    """Return all rows (or first top_k) — for broad queries."""
+    import psycopg2.extras
+    from services.database_service import _get_connection
+
+    scope = "WHERE e.document_id = ANY(%s)" if document_ids else ""
+    sql = f"""
+        SELECT e.id, e.document_id, e.sheet_name, e.row_number,
+               e.row_data, e.row_text, d.filename, 1.0 AS rank
+        FROM excel_rows e
+        JOIN documents d ON d.id = e.document_id
+        {scope}
+        ORDER BY e.document_id, e.sheet_name, e.row_number
+        LIMIT %s;
+    """
+    params = ([document_ids, top_k] if document_ids else [top_k])
+    if document_ids:
+        params = (document_ids, top_k)
+    else:
+        params = (top_k,)
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return _parse_rows(rows)
+
+
+def _parse_rows(rows) -> list:
+    """Convert DB rows to clean dicts."""
+    results = []
+    for r in rows:
+        row = dict(r)
+        if isinstance(row.get("row_data"), str):
+            row["row_data"] = json.loads(row["row_data"])
+        results.append(row)
+    return results
 
 
 def _fallback_search(query: str, document_ids: list, top_k: int) -> list:

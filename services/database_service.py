@@ -127,6 +127,12 @@ def initialize_database() -> None:
     from services.chat_service import ensure_chat_tables
     ensure_chat_tables()
 
+    # Metadata and Excel tables
+    from services.metadata_service import ensure_metadata_table
+    from services.excel_service import ensure_excel_table
+    ensure_metadata_table()
+    ensure_excel_table()
+
     logger.info("Database initialisation complete.")
 
 

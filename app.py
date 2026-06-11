@@ -248,29 +248,51 @@ def do_ingest(uploaded_file, category="general"):
 
     doc_id = None
     try:
-        # Insert document row first
+        import io as _io, gc, time
+
+        # Read file bytes ONCE into memory — prevents Windows double file-lock.
+        # openpyxl on Windows holds a handle even after wb.close(); reading to
+        # BytesIO releases the OS handle immediately so ingest_excel can open cleanly.
+        raw_bytes  = dest_path.read_bytes()
+        file_bytes = _io.BytesIO(raw_bytes)
+
+        # Insert document row
         doc_id = insert_document(
             filename=uploaded_file.name,
             filepath=str(dest_path.resolve()),
             category=category,
         )
 
-        # Always extract metadata for all formats
-        extract_metadata(str(dest_path.resolve()), doc_id)
-
-        # Excel → store rows, skip RAG chunking
+        # Excel → row storage (no embedding needed)
         if f".{ext}" in EXCEL_EXTENSIONS:
             from services.excel_service import ingest_excel
-            info = ingest_excel(str(dest_path.resolve()), doc_id)
+
+            # Metadata from bytes — no second file open
+            try:
+                file_bytes.seek(0)
+                extract_metadata_bytes = __import__(
+                    "services.metadata_service", fromlist=["extract_metadata"]
+                ).extract_metadata
+                extract_metadata_bytes(str(dest_path.resolve()), doc_id)
+            except Exception:
+                pass
+
+            # Ingest rows from BytesIO
+            file_bytes.seek(0)
+            info = ingest_excel(file_bytes, doc_id)
             return (
                 True,
                 f"Excel ingested: {info['sheet_count']} sheet(s), "
-                f"{info['total_rows']} rows stored. "
-                f"Ready for lookup and aggregation queries.",
+                f"{info['total_rows']} rows stored.",
                 info["total_rows"],
             )
 
         # All other formats → RAG pipeline
+        try:
+            extract_metadata(str(dest_path.resolve()), doc_id)
+        except Exception:
+            pass
+
         text   = load_document(str(dest_path))
         chunks = chunk_text(text)
         insert_embeddings(document_id=doc_id, chunks=chunks)
@@ -284,12 +306,22 @@ def do_ingest(uploaded_file, category="general"):
         return True, f"Ingested '{uploaded_file.name}' → {len(chunks)} chunks stored.", len(chunks)
 
     except Exception as exc:
-        dest_path.unlink(missing_ok=True)
+        # Best-effort cleanup — handle Windows file lock gracefully
+        try:
+            gc.collect()
+            time.sleep(0.3)
+            dest_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass  # file still locked by OS — leave it, do not crash
+        except Exception:
+            pass
+
         if doc_id is not None:
             try:
                 delete_document(doc_id)
             except Exception:
                 pass
+
         return False, f"Ingestion failed: {str(exc)}", 0
 
 def do_embed_all():
@@ -636,11 +668,30 @@ elif page == "📊 Data Explorer":
             st.markdown(f'<div class="role-label-assistant">Explorer ({item["mode"]})</div>',
                         unsafe_allow_html=True)
 
-            if item.get("error") and item["error"] != "BLOCKED":
+            if item.get("friendly_error"):
+                # Show partial result if fallback succeeded
+                if item.get("fallback") and item.get("result") is not None:
+                    st.warning(
+                        f"⚠️ Automatic analysis used instead: {item['friendly_error']}"
+                    )
+                else:
+                    st.error(f"❌ {item['friendly_error']}")
+                    st.info("💡 Try rephrasing, or use a Quick Query chip below for instant results.")
+            elif item.get("error"):
                 st.error(f"❌ {item['error']}")
-            elif item["result_type"] == "image" and item.get("image_bytes"):
+            if item.get("fallback") and not item.get("friendly_error"):
+                st.caption("⟳ Fell back to automatic statistical analysis.")
+            if item["result_type"] == "image" and item.get("image_bytes"):
+                pass  # handled below
+            elif False:
+                pass  # placeholder to fix elif chain
+            if item["result_type"] == "image" and item.get("image_bytes"):
                 st.image(item["image_bytes"], use_container_width=True)
             elif item["result_type"] == "dataframe":
+                from services.data_explorer_service import get_result_notice
+                notice = get_result_notice(item["result"])
+                if notice:
+                    st.caption(f"⚠️ {notice}")
                 st.dataframe(item["result"], use_container_width=True)
             elif item["result_type"] in ("text", "list", "series"):
                 st.markdown(

@@ -124,9 +124,13 @@ def ingest_document(filepath: str, category: str = "general") -> None:
     # Excel files -> row storage
     if dest_path.suffix.lower() in EXCEL_EXTENSIONS:
         from services.excel_service import ingest_excel
+        import io as _io
         print(f"  [3/4] Ingesting Excel rows...")
         try:
-            info = ingest_excel(str(dest_path.resolve()), doc_id)
+            # Read to BytesIO first to avoid Windows file-lock issues
+            with open(dest_path, "rb") as _f:
+                _excel_bytes = _io.BytesIO(_f.read())
+            info = ingest_excel(_excel_bytes, doc_id, filename=dest_path.name)
             print(f"        \u2713 {info['sheet_count']} sheet(s), {info['total_rows']} rows stored.")
             print(f"\n  \u2713 '{filepath.name}' ingested (Excel).")
             print(f"    Rows     : {info['total_rows']}")

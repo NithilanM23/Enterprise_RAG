@@ -54,6 +54,8 @@ BLOCKED_PATTERNS = [
     # Block file reading — df is already loaded, no file access needed
     r"pd\.read_csv", r"pd\.read_excel", r"pd\.read_",
     r"open\s*\(", r"\bcsv\.reader\b",
+    # Block file writing from visualizations
+    r"\.savefig\s*\(", r"plt\.savefig\s*\(",
 ]
 
 # Statistical intent keywords
@@ -64,6 +66,9 @@ STAT_KEYWORDS = {
     "unique", "nunique", "count", "value_counts",
     "correlation", "corr", "mean", "median", "mode", "std",
     "variance", "min", "max", "range", "percentile", "quantile",
+    # Search and presence queries handled statistically
+    "is there", "is present", "find", "search", "contains", "contain",
+    "filter", "where", "which rows", "list all", "show all",
 }
 
 # Visualization intent keywords
@@ -136,6 +141,38 @@ def build_schema_context(df, filename: str = "") -> str:
 # Intent detection
 # ---------------------------------------------------------------------------
 
+def _extract_search_term(query: str, columns) -> str:
+    """
+    Extract the search term from a query like:
+      "is 'Toyota' present?" -> "Toyota"
+      "find rows where brand is Honda" -> "Honda"
+      "search for INV-2024" -> "INV-2024"
+    """
+    import re
+    q = query
+
+    # Extract quoted strings first
+    quoted = re.findall(r"([\'\"])(.*?)\1", q)
+    if quoted:
+        return quoted[0][1] if quoted else None
+
+    # Remove column names and common filler words from query
+    col_words = set()
+    for col in columns:
+        col_words.update(col.lower().split())
+
+    stopwords = {
+        "is", "are", "there", "present", "find", "search", "show", "me",
+        "all", "rows", "where", "which", "has", "have", "contain", "contains",
+        "the", "a", "an", "in", "of", "for", "any", "exists", "list",
+        "filter", "with", "by", "from", "column",
+    } | col_words
+
+    tokens = [t for t in re.findall(r"[\w\-\.]+", q) if t.lower() not in stopwords and len(t) >= 2]
+
+    return tokens[0] if tokens else None
+
+
 def detect_intent(query: str) -> str:
     """
     Classify the query into one of three modes.
@@ -149,6 +186,12 @@ def detect_intent(query: str) -> str:
 
     if any(kw in q for kw in VIZ_KEYWORDS):
         return "visualization"
+
+    # Presence/search queries go to statistical (uses str.contains — no LLM needed)
+    if any(phrase in q for phrase in ["is there", "is present", "are there",
+                                       "exists", "search for", "find me",
+                                       "show all rows", "filter by"]):
+        return "statistical"
 
     if any(kw in q for kw in STAT_KEYWORDS):
         return "statistical"
@@ -328,6 +371,37 @@ def run_statistical(query: str, df) -> dict:
                 "operation":   f"df['{col}'].unique()",
             }
 
+    # Search / is present / contains
+    if any(w in q for w in ["is there", "is present", "find", "search",
+                             "contain", "has", "exists", "show me all",
+                             "filter", "where", "which rows", "list all"]):
+        col  = _find_column_in_query(q, df.columns)
+        term = _extract_search_term(q, df.columns)
+        if term and col:
+            mask   = df[col].astype(str).str.contains(term, case=False, na=False, regex=False)
+            found  = df[mask]
+            if found.empty:
+                # Try regex as fallback
+                try:
+                    mask  = df[col].astype(str).str.contains(term, case=False, na=False, regex=True)
+                    found = df[mask]
+                except Exception:
+                    pass
+            return {
+                "result":      found if not found.empty else f"No rows found matching '{term}' in '{col}'.",
+                "result_type": "dataframe" if not found.empty else "text",
+                "operation":   f"df[df['{col}'].str.contains('{term}', case=False)]",
+            }
+        elif term:
+            # Search across all string columns
+            mask = df.apply(lambda col: col.astype(str).str.contains(term, case=False, na=False, regex=False)).any(axis=1)
+            found = df[mask]
+            return {
+                "result":      found if not found.empty else f"No rows found matching '{term}' across all columns.",
+                "result_type": "dataframe" if not found.empty else "text",
+                "operation":   f"df[df.apply(lambda c: c.astype(str).str.contains('{term}', case=False)).any(axis=1)]",
+            }
+
     # Default — describe
     return {
         "result":      df.describe(include="all"),
@@ -377,22 +451,42 @@ def run_code_generation(query: str, df, schema_context: str, filename: str = "")
     if error and error != "BLOCKED":
         # Retry once with error context
         logger.info("Code generation retry after error: %s", error[:100])
-        retry_code   = _generate_code(query, schema_context, previous_error=error)
+        retry_code    = _generate_code(query, schema_context, previous_error=error)
         result, error = _execute_safe(retry_code, df)
+
+        if error:
+            # Both attempts failed — fall back to statistical mode
+            logger.warning("Both code gen attempts failed. Falling back to statistical mode.")
+            try:
+                stat = run_statistical(query, df)
+                return {
+                    "result":      stat["result"],
+                    "result_type": stat["result_type"],
+                    "code":        stat["operation"],
+                    "error":       None,
+                    "retried":     True,
+                    "fallback":    True,
+                    "friendly_error": _classify_error(error),
+                }
+            except Exception:
+                pass
+
         return {
             "result":      result,
             "result_type": _infer_result_type(result),
             "code":        retry_code,
-            "error":       error,
+            "error":       _classify_error(error) if error else None,
             "retried":     True,
+            "fallback":    False,
         }
 
     return {
         "result":      result,
         "result_type": _infer_result_type(result),
         "code":        code,
-        "error":       error,
+        "error":       _classify_error(error) if error else None,
         "retried":     False,
+        "fallback":    False,
     }
 
 
@@ -405,7 +499,14 @@ def _generate_code(query: str, schema_context: str, previous_error: str = None) 
 
     error_section = ""
     if previous_error:
-        error_section = f"\nThe previous attempt failed with this error:\n{previous_error}\nPlease fix the code.\n"
+        error_section = (
+            f"\nIMPORTANT: The previous attempt failed with:\n"
+            f"{previous_error}\n"
+            f"Fix the code. Common mistakes to avoid:\n"
+            f"- Do NOT use pd.read_csv() or open() — df is already loaded\n"
+            f"- Do NOT use .loc[] with a Series result from idxmax() — use .iloc[int_index] instead\n"
+            f"- Assign scalar results directly to `result`, not row selections\n"
+        )
 
     prompt = f"""You are a Python/pandas expert. Generate Python code to answer this question.
 
@@ -443,9 +544,119 @@ def _is_safe(code: str) -> tuple:
     return True, ""
 
 
+
+def _preprocess_code(code: str, df_columns: list) -> str:
+    """
+    Fix common LLM code generation mistakes before execution.
+    Applied to every generated code block — no LLM call needed.
+
+    Fixes:
+      1. Remove stray import statements (pd/np already in namespace)
+      2. Remove any df = pd.read_* lines (df already loaded)
+      3. Fix .loc[series.idxmax()] → .iloc[series.idxmax()] pattern
+      4. Remove print() calls (stdout not captured in sandbox)
+      5. Ensure result is assigned even if LLM used return instead
+      6. Strip markdown artifacts
+    """
+    import re
+
+    # Strip markdown
+    code = re.sub(r"```python", "", code)
+    code = re.sub(r"```",       "", code)
+    code = code.strip()
+
+    lines     = code.split("\n")
+    cleaned   = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Remove import statements — everything is pre-imported
+        if re.match(r"^import\s+|^from\s+\S+\s+import", stripped):
+            continue
+
+        # Remove df = pd.read_*(...) — df is already loaded
+        if re.match(r"^df\s*=\s*pd\.read_", stripped):
+            continue
+
+        # Remove standalone print() calls
+        if re.match(r"^print\s*\(", stripped):
+            continue
+
+        cleaned.append(line)
+
+    code = "\n".join(cleaned).strip()
+
+    # Fix .loc[expr.idxmax()] → safer .iloc[int(expr.idxmax())]
+    code = re.sub(
+        r"\.loc\[([^\]]+)\.idxmax\(\)\]",
+        r".iloc[int(\1.idxmax())]",
+        code,
+    )
+    code = re.sub(
+        r"\.loc\[([^\]]+)\.idxmin\(\)\]",
+        r".iloc[int(\1.idxmin())]",
+        code,
+    )
+
+    # If LLM used "return X" instead of "result = X", convert it
+    code = re.sub(r"^return\s+(.+)$", r"result = \1", code, flags=re.MULTILINE)
+
+    # If no result assignment found, wrap last expression as result
+    if "result" not in code:
+        lines = [l for l in code.split("\n") if l.strip()]
+        if lines:
+            last = lines[-1].strip()
+            # If last line looks like an expression (not assignment/if/for/etc)
+            if not re.match(r"^(if|for|while|def|class|try|with|import)", last):
+                lines[-1] = f"result = {last}"
+                code = "\n".join(lines)
+
+    return code
+
+
+def _classify_error(error: str) -> str:
+    """
+    Convert a raw Python error into a user-friendly message.
+    Never exposes raw tracebacks to the user.
+    """
+    e = error.lower()
+
+    if "keyerror" in e:
+        col = error.split('KeyError:')[-1].strip().strip('"\'')
+        return (
+            f"Column '{col}' was not found. "
+            f"Please check the column name — it may have different capitalisation or spacing."
+        )
+    if "valueerror" in e and "could not convert" in e:
+        return "A column contains mixed data types (text and numbers). Try specifying the column more precisely."
+    if "typeerror" in e:
+        return "Data type mismatch — the operation is not compatible with this column's data type."
+    if "indexerror" in e or "index" in e and "out of bounds" in e:
+        return "Row index out of range. The dataset may have fewer rows than expected."
+    if "attributeerror" in e:
+        return "The operation is not supported for this data type. Try a different approach."
+    if "syntaxerror" in e:
+        return "The generated code had a syntax error. Please rephrase your question more specifically."
+    if "nameerror" in e:
+        return "A variable or function was referenced that doesn't exist in the analysis context."
+    if "zerodivisionerror" in e:
+        return "Division by zero encountered. The column may contain zero values."
+    if "blocked" in e:
+        return "The query was blocked for security reasons. Please use a different approach."
+    if "no such file" in e or "filenotfound" in e:
+        return "The code tried to read a file. Use the pre-loaded DataFrame 'df' directly instead."
+    if "no 'result' variable" in e:
+        return "The analysis ran but produced no output. Try rephrasing your question."
+
+    # Fallback — generic but not the raw traceback
+    return "The analysis could not be completed. Try rephrasing your question or use a quick query chip below."
+
 def _execute_safe(code: str, df) -> tuple:
     """
     Execute generated pandas code in a sandboxed namespace.
+    Works on a COPY of df so the original is never mutated.
+    Post-processes result to sanitise common LLM mistakes.
 
     Returns:
         (result, error_string_or_None)
@@ -453,35 +664,89 @@ def _execute_safe(code: str, df) -> tuple:
     import pandas as pd
     import numpy as np
 
+    # Pre-process: fix common LLM mistakes before safety check
+    code = _preprocess_code(code, list(df.columns))
+
     safe, reason = _is_safe(code)
     if not safe:
         logger.warning("Blocked unsafe code: %s", reason)
-        return None, "BLOCKED"
+        return None, f"Unsafe code blocked: {reason}"
 
-    # Restricted namespace — only df, pd, np accessible
+    # Work on a copy — never mutate the original DataFrame
     namespace = {
-        "df":  df,
-        "pd":  pd,
-        "np":  np,
-        "len": len,
-        "str": str,
-        "int": int,
-        "float": float,
-        "list": list,
-        "dict": dict,
-        "round": round,
-        "sum":  sum,
-        "min":  min,
-        "max":  max,
-        "print": print,
+        "df":     df.copy(),
+        "pd":     pd,
+        "np":     np,
+        "len":    len,
+        "str":    str,
+        "int":    int,
+        "float":  float,
+        "list":   list,
+        "dict":   dict,
+        "round":  round,
+        "sum":    sum,
+        "min":    min,
+        "max":    max,
+        "abs":    abs,
+        "range":  range,
+        "print":  print,
+        "sorted": sorted,
+        "zip":    zip,
+        "enumerate": enumerate,
     }
 
     try:
         exec(compile(code, "<generated>", "exec"), namespace)
-        result = namespace.get("result", "Code executed but no 'result' variable was set.")
+        result = namespace.get("result", "Code ran but no 'result' variable was set.")
+        result = _sanitise_result(result, df)
         return result, None
+    except KeyError as exc:
+        return None, (
+            f"KeyError: {exc}. "
+            "Hint: use .iloc[] for positional indexing or .at[] for label-based scalar access."
+        )
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
+
+
+def _sanitise_result(result, df):
+    """
+    Fix common LLM output mistakes before displaying:
+      - idxmax/idxmin returning a Series used as .loc index → resolve to row
+      - Single-column DataFrame → convert to Series for cleaner display
+      - Huge results → truncate with message
+    """
+    import pandas as pd
+
+    if result is None:
+        return result
+
+    # If result is a Series returned by idxmax/idxmin, fetch those rows
+    if isinstance(result, pd.Series) and result.dtype == object:
+        # Could be index labels — try to use as .loc safely
+        try:
+            candidate = df.loc[result]
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                return candidate
+        except Exception:
+            pass
+
+    # If scalar idxmax result accidentally stored (int/str label)
+    if isinstance(result, (int, str)):
+        try:
+            candidate = df.loc[[result]]
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                return candidate
+        except Exception:
+            pass
+
+    # Truncate very large DataFrames for display
+    if isinstance(result, pd.DataFrame) and len(result) > 500:
+        trunc = result.head(500)
+        trunc.attrs["truncated"] = f"Showing 500 of {len(result)} rows."
+        return trunc
+
+    return result
 
 
 def _infer_result_type(result) -> str:
@@ -498,9 +763,124 @@ def _infer_result_type(result) -> str:
     return "text"
 
 
+def get_result_notice(result) -> str:
+    """Return a notice string if the result was truncated, else empty string."""
+    import pandas as pd
+    if isinstance(result, pd.DataFrame):
+        return result.attrs.get("truncated", "")
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Mode 3 — Visualization
 # ---------------------------------------------------------------------------
+
+
+def _preprocess_viz_code(code: str) -> str:
+    """
+    Fix common LLM mistakes in matplotlib/visualization code:
+
+    1. Remove fig.savefig() / plt.savefig() — we capture via BytesIO
+    2. Move fig = plt.gcf() to AFTER the plot commands — not before
+    3. Fix plt.pie(value_counts_result, labels=unique_result) mismatch:
+         value_counts() and unique() return different orderings.
+         Replace with consistent: vc = df[col].value_counts()
+                                   plt.pie(vc.values, labels=vc.index)
+    4. Remove plt.show() — non-interactive backend
+    5. Remove stray import statements
+    """
+    import re
+
+    # Strip markdown
+    code = re.sub(r"```python", "", code)
+    code = re.sub(r"```",       "", code)
+
+    lines   = code.strip().split("\n")
+    cleaned = []
+    has_gcf = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Remove savefig calls
+        if re.search(r"(plt\.savefig|fig\.savefig)\s*\(", stripped):
+            continue
+
+        # Remove plt.show()
+        if stripped == "plt.show()":
+            continue
+
+        # Remove imports
+        if re.match(r"^import\s+|^from\s+\S+\s+import", stripped):
+            continue
+
+        # Remove df = pd.read_*
+        if re.match(r"^df\s*=\s*pd\.read_", stripped):
+            continue
+
+        # Track gcf assignment — we'll add it at the end
+        if re.match(r"^fig\s*=\s*plt\.gcf\(\)", stripped):
+            has_gcf = True
+            continue   # don't add it here — add at end
+
+        cleaned.append(line)
+
+    # Fix value_counts + unique mismatch in plt.pie
+    code = "\n".join(cleaned)
+    code = _fix_pie_labels(code)
+
+    # Always put fig = plt.gcf() at the very end
+    code = code.rstrip()
+    code += "\nfig = plt.gcf()"
+
+    return code
+
+
+def _fix_pie_labels(code: str) -> str:
+    """
+    Fix the common plt.pie mismatch:
+      plt.pie(df['col'].value_counts(), labels=df['col'].unique())
+    →
+      _vc = df['col'].value_counts()
+      plt.pie(_vc.values, labels=_vc.index, ...)
+
+    This ensures labels always match the data order.
+    """
+    import re
+
+    def replace_pie(match):
+        full     = match.group(0)
+        # Extract the series expression from value_counts call
+        vc_match = re.search(r"df\[([^\]]+)\]\.value_counts\(\)", full)
+        if not vc_match:
+            return full
+
+        col_expr = vc_match.group(1)  # e.g. 'Drivetrain'
+
+        # Build a safe replacement
+        setup  = f"_vc = df[{col_expr}].value_counts(dropna=True)"
+        # Reconstruct pie call replacing the data and labels args
+        new_pie = re.sub(
+            r"df\[([^\]]+)\]\.value_counts\(\)",
+            "_vc.values",
+            full
+        )
+        # Replace any labels=df[...].unique() with labels=_vc.index
+        new_pie = re.sub(
+            r"labels\s*=\s*df\[([^\]]+)\]\.(unique|value_counts)\(\)(\.index)?",
+            "labels=_vc.index",
+            new_pie
+        )
+        return setup + "\n" + new_pie
+
+    # Match plt.pie(...) calls that span one line
+    code = re.sub(
+        r"plt\.pie\([^)]+\.value_counts\(\)[^)]*\)",
+        replace_pie,
+        code,
+        flags=re.DOTALL
+    )
+    return code
 
 def run_visualization(query: str, df, schema_context: str) -> dict:
     """
@@ -513,24 +893,31 @@ def run_visualization(query: str, df, schema_context: str) -> dict:
 
     prompt = f"""You are a Python data visualization expert. Generate matplotlib code.
 
-CRITICAL RULES:
-1. The DataFrame is ALREADY in memory as `df`. DO NOT use pd.read_csv() or open().
-2. matplotlib.pyplot is available as `plt`. pandas (pd) and numpy (np) are available. Do NOT import anything.
-3. Do NOT call plt.show(). Save with: fig = plt.gcf()
-4. Give the chart a clear title.
-5. Return ONLY Python code — no explanation, no markdown.
+CRITICAL RULES — MUST FOLLOW EXACTLY:
+1. `df` is already in memory. DO NOT use pd.read_csv(), pd.read_excel(), or open().
+2. `plt`, `pd`, `np` are already imported. DO NOT import anything.
+3. Do NOT call plt.show() or fig.savefig() — output is captured automatically.
+4. Put fig = plt.gcf() at the VERY LAST LINE — not before the plot.
+5. Give the chart a clear title using plt.title().
+6. Return ONLY Python code — no explanation, no markdown, no comments.
+
+IMPORTANT — For pie charts:
+  Use value_counts() for BOTH the data AND labels:
+    vc = df['ColumnName'].value_counts(dropna=True)
+    plt.pie(vc.values, labels=vc.index, autopct='%1.1f%%')
+  NEVER mix value_counts() data with unique() labels — they have different ordering.
 
 DataFrame info:
 {schema_context}
 
 Question: {query}
 
-Code (use `df` directly):"""
+Code (use `df` directly, end with fig = plt.gcf()):"""
 
     raw_code = _call_ollama(prompt).strip()
-    raw_code = re.sub(r"```python", "", raw_code)
-    raw_code = re.sub(r"```",       "", raw_code)
-    code     = raw_code.strip()
+
+    # Apply visualization-specific preprocessor before safety check
+    code = _preprocess_viz_code(raw_code)
 
     safe, reason = _is_safe(code)
     if not safe:
@@ -541,17 +928,30 @@ Code (use `df` directly):"""
 
     try:
         import matplotlib
-        matplotlib.use("Agg")   # non-interactive backend — no GUI window
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         namespace = {
-            "df":  df, "pd": pd, "np": np,
-            "plt": plt, "fig": None,
+            "df":     df.copy(),   # never mutate original
+            "pd":     pd,
+            "np":     np,
+            "plt":    plt,
+            "fig":    None,
+            "len":    len,
+            "list":   list,
+            "range":  range,
+            "sorted": sorted,
+            "str":    str,
+            "int":    int,
+            "float":  float,
         }
 
         plt.figure(figsize=(10, 6))
+        plt.tight_layout()
+
         exec(compile(code, "<generated_viz>", "exec"), namespace)
 
+        # Always grab the current figure — whether LLM set fig or not
         fig = namespace.get("fig") or plt.gcf()
 
         buf = io.BytesIO()
@@ -563,7 +963,12 @@ Code (use `df` directly):"""
 
     except Exception as exc:
         plt.close("all")
-        return {"image_bytes": None, "code": code, "error": f"{type(exc).__name__}: {exc}"}
+        friendly = _classify_error(f"{type(exc).__name__}: {exc}")
+        return {
+            "image_bytes": None,
+            "code":        code,
+            "error":       friendly,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -614,13 +1019,15 @@ def answer_query(query: str, df, schema_context: str, filename: str = "") -> dic
     else:
         code_result = run_code_generation(query, df, schema_context, filename)
         return {
-            "mode":        "code",
-            "result":      code_result["result"],
-            "result_type": code_result["result_type"],
-            "code":        code_result["code"],
-            "image_bytes": None,
-            "error":       code_result["error"],
-            "retried":     code_result["retried"],
+            "mode":          "code" if not code_result.get("fallback") else "statistical",
+            "result":        code_result["result"],
+            "result_type":   code_result["result_type"],
+            "code":          code_result["code"],
+            "image_bytes":   None,
+            "error":         code_result.get("error"),
+            "friendly_error": code_result.get("friendly_error"),
+            "retried":       code_result["retried"],
+            "fallback":      code_result.get("fallback", False),
         }
 
 
