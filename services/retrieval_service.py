@@ -45,12 +45,8 @@ BM25_K        = 20    # chunks from BM25 search
 RRF_K         = 60    # RRF dampening constant
 RRF_POOL      = 30    # candidates after RRF → into MMR
 MMR_POOL      = 20    # candidates after MMR → into reranker
-MMR_LAMBDA    = 0.7   # MMR relevance/diversity tradeoff (0=diverse, 1=relevant)
-
-# Reranker score threshold — chunks below this are filtered as noise.
-# -4.0 was too aggressive and dropped valid chunks on ambiguous queries.
-# -6.0 only filters truly irrelevant chunks while keeping borderline ones.
-MIN_RERANKER_SCORE = -6.0
+# Raised from 0.7 — strongly prefer relevance, only diversify when chunks are nearly equal
+MMR_LAMBDA    = 0.85  # MMR relevance/diversity tradeoff (0=diverse, 1=relevant)
 
 
 # ---------------------------------------------------------------------------
@@ -167,24 +163,42 @@ def retrieve(
     routing_info = {"category": "general", "routed": False, "confidence": 0.0}
 
     if document_ids is None:
-        # No manual override — use automatic routing
-        from services.router_service import classify_query, get_document_ids_for_category
+        from services.router_service import (
+            classify_query, get_document_ids_for_category, ROUTING_CONFIDENCE_THRESHOLD
+        )
         routing_info = classify_query(query)
 
         if routing_info["routed"]:
-            document_ids = get_document_ids_for_category(routing_info["category"])
-            if document_ids:
-                logger.info(
-                    "Query routed to category '%s' (confidence=%.1f) → %d docs in scope.",
-                    routing_info["category"], routing_info["confidence"], len(document_ids),
-                )
+            scoped_ids = get_document_ids_for_category(routing_info["category"])
+
+            if scoped_ids:
+                confidence = routing_info["confidence"]
+
+                if confidence >= 2.0:
+                    # High confidence → hard scope to category only
+                    document_ids = scoped_ids
+                    logger.info(
+                        "Hard routing: category='%s' confidence=%.1f → %d docs.",
+                        routing_info["category"], confidence, len(scoped_ids),
+                    )
+                else:
+                    # Low confidence → soft scope: prefer category but don't exclude others.
+                    # Search globally; category docs will naturally rank higher because
+                    # their content matches the routing keyword that triggered routing.
+                    document_ids = None
+                    routing_info["routed"] = False
+                    routing_info["soft_scope"] = scoped_ids
+                    logger.info(
+                        "Soft routing: category='%s' confidence=%.1f → global search "
+                        "(category docs preferred by relevance).",
+                        routing_info["category"], confidence,
+                    )
             else:
-                # Category exists but no documents tagged with it — search all
                 document_ids = None
                 routing_info["routed"] = False
         else:
             logger.info(
-                "Routing confidence %.1f below threshold — searching all documents.",
+                "Routing confidence %.1f below threshold — global search.",
                 routing_info["confidence"],
             )
 
@@ -278,24 +292,14 @@ def retrieve(
         from services.reranker_service import rerank
         reranked = rerank(query, mmr_candidates, top_k=len(mmr_candidates))
 
-        # Apply reranker score threshold — filter noise
-        filtered = [
-            c for c in reranked
-            if c.get("reranker_score", 0) >= MIN_RERANKER_SCORE
-        ]
-
-        if not filtered:
-            logger.warning(
-                "All chunks scored below threshold %.1f — no confident answer.",
-                MIN_RERANKER_SCORE,
-            )
-            # Return empty → LLM will say "I could not find this"
-            return []
-
-        final_chunks = filtered[:k]
+        # Use top-K only — no hard score threshold.
+        # The reranker already orders correctly; a threshold adds no value
+        # and removes valid internal document chunks that score low on this
+        # web-trained model due to writing style differences.
+        final_chunks = reranked[:k]
         logger.info(
-            "Reranker: %d passed threshold, returning top %d.",
-            len(filtered), len(final_chunks),
+            "Reranker: returning top %d of %d candidates.",
+            len(final_chunks), len(reranked),
         )
 
     except Exception as exc:

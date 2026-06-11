@@ -60,7 +60,7 @@ def _call_ollama(prompt: str) -> str:
         "stream": False,
         "options": {
             "temperature": 0.1,
-            "num_predict": 512,
+            "num_predict": 1024,  # increased from 512 — prevents answer truncation
         },
         "think": False,   # suppresses <think> blocks for Qwen3 models
     }
@@ -123,8 +123,17 @@ def build_prompt(question: str, chunks: list, history: list = None) -> str:
     if not chunks:
         context = "No relevant context found in the uploaded documents."
     else:
+        # Sort by reranker score descending — most relevant chunk first.
+        # Small models suffer from "lost in the middle": they attend well to
+        # the first and last chunks but poorly to the middle. Putting the
+        # best chunk first maximises the chance of a correct answer.
+        sorted_chunks = sorted(
+            chunks,
+            key=lambda c: c.get("reranker_score", c.get("similarity", 0)),
+            reverse=True,
+        )
         context_parts = []
-        for i, chunk in enumerate(chunks, start=1):
+        for i, chunk in enumerate(sorted_chunks, start=1):
             context_parts.append(
                 f"[Source {i}: {chunk['filename']}, chunk {chunk['chunk_number']}]\n"
                 f"{chunk['chunk_text']}"

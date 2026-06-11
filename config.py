@@ -76,14 +76,14 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # Chunking
 # ---------------------------------------------------------------------------
 
-CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE",    "200"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+CHUNK_SIZE    = int(os.getenv("CHUNK_SIZE",    "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 # ---------------------------------------------------------------------------
 # Retrieval
 # ---------------------------------------------------------------------------
 
-TOP_K = int(os.getenv("TOP_K", "5"))   # Number of chunks returned per query
+TOP_K = int(os.getenv("TOP_K", "3"))   # Number of chunks returned per query
 
 # ---------------------------------------------------------------------------
 # Document Upload

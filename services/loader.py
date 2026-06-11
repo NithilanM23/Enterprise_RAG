@@ -231,9 +231,18 @@ def _load_docx(filepath: str) -> str:
             continue
 
         style_name = para.style.name if para.style else ""
+        is_heading  = "Heading" in style_name or "Title" in style_name
 
-        # Detect heading styles: "Heading 1", "Heading 2", "Heading 3", etc.
-        if "Heading" in style_name or "Title" in style_name:
+        # Fallback: detect bold-only paragraphs as headings.
+        # Many internal documents use manual bold formatting instead of
+        # Word Heading styles. A short paragraph (< 80 chars) where every
+        # non-empty run is bold is almost certainly a section heading.
+        if not is_heading and len(text) < 80:
+            runs = [r for r in para.runs if r.text.strip()]
+            if runs and all(r.bold for r in runs):
+                is_heading = True
+
+        if is_heading:
             sections.append(HEADING_MARKER.format(text))
         else:
             sections.append(text)

@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
-# Number of previous message pairs (user + assistant) to include as context
-HISTORY_WINDOW = 6   # last 6 messages = 3 exchanges
+# Reduced from 6 — shorter history = shorter prompt = better small model attention
+HISTORY_WINDOW = 3   # last 3 messages = 1.5 exchanges
 
 
 # ---------------------------------------------------------------------------
