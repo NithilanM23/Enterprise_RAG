@@ -230,7 +230,7 @@ def run_statistical(query: str, df) -> dict:
 
     if any(w in q for w in ["dtypes", "types", "data types"]):
         return {
-            "result":      df.dtypes.reset_index().rename(
+            "result":      df.dtypes.astype(str).reset_index().rename(
                                columns={"index": "Column", 0: "Type"}
                            ),
             "result_type": "dataframe",

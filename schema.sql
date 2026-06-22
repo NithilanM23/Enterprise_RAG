@@ -14,6 +14,17 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- =============================================================================
+-- USERS TABLE
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =============================================================================
 -- CORE RAG TABLES
 -- =============================================================================
 
@@ -21,11 +32,12 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- One row per uploaded file. Category drives smart query routing.
 CREATE TABLE IF NOT EXISTS documents (
     id          SERIAL PRIMARY KEY,
+    user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     filename    TEXT        NOT NULL,
     filepath    TEXT        NOT NULL,
     upload_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     category    TEXT        NOT NULL DEFAULT 'general',
-    CONSTRAINT documents_filename_unique UNIQUE (filename)
+    CONSTRAINT documents_user_filename_unique UNIQUE (user_id, filename)
 );
 
 -- embeddings
@@ -55,6 +67,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 -- One row per conversation session. Persists across app restarts.
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id         SERIAL PRIMARY KEY,
+    user_id    INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title      TEXT        NOT NULL DEFAULT 'New Chat',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

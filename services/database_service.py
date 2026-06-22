@@ -133,6 +133,14 @@ def initialize_database() -> None:
     ensure_metadata_table()
     ensure_excel_table()
 
+    # Settings, Categories, and Pins tables
+    from services.settings_service import ensure_settings_table
+    from services.category_service import ensure_category_table
+    from services.pin_service import ensure_pin_table
+    ensure_settings_table()
+    ensure_category_table()
+    ensure_pin_table()
+
     logger.info("Database initialisation complete.")
 
 
@@ -199,14 +207,24 @@ def _ensure_pgvector_extension() -> None:
 
 def _ensure_tables() -> None:
     """Create documents and embeddings tables if they do not exist."""
+    create_users = """
+        CREATE TABLE IF NOT EXISTS users (
+            id            SERIAL PRIMARY KEY,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """
+
     create_documents = """
         CREATE TABLE IF NOT EXISTS documents (
             id          SERIAL PRIMARY KEY,
+            user_id     INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             filename    TEXT        NOT NULL,
             filepath    TEXT        NOT NULL,
             upload_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             category    TEXT        NOT NULL DEFAULT 'general',
-            CONSTRAINT documents_filename_unique UNIQUE (filename)
+            CONSTRAINT documents_user_filename_unique UNIQUE (user_id, filename)
         );
     """
 
@@ -226,16 +244,17 @@ def _ensure_tables() -> None:
     # running DDL here; register_vector is not needed for CREATE TABLE.
     with _get_raw_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(create_users)
             cur.execute(create_documents)
             cur.execute(create_embeddings)
-    logger.debug("Tables ensured: documents, embeddings.")
+    logger.debug("Tables ensured: users, documents, embeddings.")
 
 
 # ---------------------------------------------------------------------------
 # Document operations
 # ---------------------------------------------------------------------------
 
-def insert_document(filename: str, filepath: str, category: str = "general") -> int:
+def insert_document(user_id: int, filename: str, filepath: str, category: str = "general") -> int:
     """
     Insert a document record and return its new ID.
 
@@ -249,14 +268,14 @@ def insert_document(filename: str, filepath: str, category: str = "general") -> 
         ValueError: if a document with the same filename already exists.
     """
     query = """
-        INSERT INTO documents (filename, filepath, upload_time, category)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO documents (user_id, filename, filepath, upload_time, category)
+        VALUES (%s, %s, %s, NOW(), %s)
         RETURNING id;
     """
     with _get_connection() as conn:
         with conn.cursor() as cur:
             try:
-                cur.execute(query, (filename, filepath, datetime.now(timezone.utc), category))
+                cur.execute(query, (user_id, filename, filepath, category))
                 row = cur.fetchone()
                 doc_id = row[0]
                 logger.info("Inserted document '%s' with id=%d", filename, doc_id)
@@ -268,7 +287,7 @@ def insert_document(filename: str, filepath: str, category: str = "general") -> 
                 )
 
 
-def get_all_documents() -> list[dict]:
+def get_all_documents(user_id: int) -> list[dict]:
     """
     Return a list of all documents ordered by upload time (newest first).
 
@@ -277,44 +296,34 @@ def get_all_documents() -> list[dict]:
     query = """
         SELECT id, filename, filepath, upload_time, category
         FROM documents
+        WHERE user_id = %s
         ORDER BY upload_time DESC;
     """
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query)
+            cur.execute(query, (user_id,))
             rows = cur.fetchall()
             return [dict(r) for r in rows]
 
 
-def get_document_by_id(doc_id: int) -> Optional[dict]:
-    """Return a single document dict or None if not found."""
-    query = "SELECT id, filename, filepath, upload_time FROM documents WHERE id = %s;"
+def get_document(user_id: int, doc_id: int) -> Optional[dict]:
+    """Return a single document dict if it belongs to user."""
+    query = "SELECT id, filename, filepath, upload_time, category FROM documents WHERE id = %s AND user_id = %s;"
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (doc_id,))
+            cur.execute(query, (doc_id, user_id))
             row = cur.fetchone()
             return dict(row) if row else None
 
 
-def get_document_by_filename(filename: str) -> Optional[dict]:
-    """Return a single document dict by filename or None if not found."""
-    query = "SELECT id, filename, filepath, upload_time FROM documents WHERE filename = %s;"
-    with _get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (filename,))
-            row = cur.fetchone()
-            return dict(row) if row else None
-
-
-def delete_document(doc_id: int) -> bool:
+def delete_document(user_id: int, doc_id: int) -> bool:
     """
     Delete a document and all its embeddings (CASCADE handles embeddings).
     Returns True if a row was deleted, False if no document with that ID existed.
     """
-    query = "DELETE FROM documents WHERE id = %s RETURNING id;"
     with _get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (doc_id,))
+            cur.execute("DELETE FROM documents WHERE id = %s AND user_id = %s RETURNING id;", (doc_id, user_id))
             deleted = cur.fetchone()
             if deleted:
                 logger.info("Deleted document id=%d and its embeddings.", doc_id)

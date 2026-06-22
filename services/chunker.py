@@ -25,7 +25,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import CHUNK_SIZE, CHUNK_OVERLAP
+from config import CHUNK_SIZE, CHUNK_OVERLAP   # fallback defaults only
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +70,13 @@ def _split_into_sections(text: str) -> list:
 # Public API
 # ---------------------------------------------------------------------------
 
-def chunk_text(text: str) -> list:
+def chunk_text(text: str, chunk_size: int = None, chunk_overlap: int = None) -> list:
     """
     Split raw text into overlapping chunks with section heading enrichment.
+
+    chunk_size / chunk_overlap default to the live admin-tunable settings
+    (services.settings_service) — never a module-level constant captured
+    at import time. Pass explicit values to override for a single call.
 
     Steps:
       1. Split on [HEADING: ...] markers → named sections
@@ -82,6 +86,8 @@ def chunk_text(text: str) -> list:
     Args:
         text: Raw document text with embedded [HEADING: ...] markers
               (produced by loader.py).
+        chunk_size    : Override for this call. Defaults to live setting.
+        chunk_overlap : Override for this call. Defaults to live setting.
 
     Returns:
         List of dicts:
@@ -97,14 +103,19 @@ def chunk_text(text: str) -> list:
     if not text or not text.strip():
         raise ValueError("Cannot chunk empty text.")
 
+    if chunk_size is None or chunk_overlap is None:
+        from services.settings_service import get_setting
+        chunk_size    = chunk_size    if chunk_size    is not None else get_setting("chunk_size")
+        chunk_overlap = chunk_overlap if chunk_overlap is not None else get_setting("chunk_overlap")
+
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
     except ImportError:
         from langchain.text_splitter import RecursiveCharacterTextSplitter
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         length_function=len,
         separators=["\n\n", "\n", " ", ""],
     )
@@ -151,11 +162,12 @@ def chunk_text(text: str) -> list:
         "Chunked into %d chunks across %d sections "
         "(chunk_size=%d, overlap=%d).",
         len(all_chunks), heading_count,
-        CHUNK_SIZE, CHUNK_OVERLAP,
+        chunk_size, chunk_overlap,
     )
 
     return all_chunks
 
 
 def get_chunk_config() -> dict:
-    return {"chunk_size": CHUNK_SIZE, "chunk_overlap": CHUNK_OVERLAP}
+    from services.settings_service import get_setting
+    return {"chunk_size": get_setting("chunk_size"), "chunk_overlap": get_setting("chunk_overlap")}

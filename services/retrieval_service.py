@@ -9,21 +9,28 @@ Full hybrid retrieval pipeline:
       |     classify_query() → category → document_ids to search
       |
       ├── [2] SEMANTIC SEARCH (pgvector, scoped to category)
-      |         → top SEMANTIC_K chunks
+      |         → top semantic_k chunks
       |
       ├── [3] BM25 KEYWORD SEARCH (scoped to category)
-      |         → top BM25_K chunks
+      |         → top bm25_k chunks
       |
       ├── [4] RRF FUSION
-      |         → merge both lists → top RERANK_POOL candidates
+      |         → merge both lists → top RRF_POOL candidates
       |
       ├── [5] MMR DIVERSIFICATION
       |         → ensure no single document monopolises results
-      |         → diverse MMR_POOL candidates
+      |         → diverse mmr_pool candidates
       |
       └── [6] CROSS-ENCODER RERANKER
                 → re-score for true relevance
-                → final top TOP_K chunks → LLM
+                → final top top_k chunks → LLM
+
+All hyperparameters below (semantic_k, bm25_k, rrf_k, mmr_pool, mmr_lambda,
+top_k, routing threshold) are read from services.settings_service at
+CALL TIME inside retrieve() — never captured as module-level constants.
+This is what makes the admin settings panel actually take effect without
+a server restart. See services/settings_service.py for the single source
+of truth and services/category_service.py for category keyword profiles.
 """
 
 import logging
@@ -32,32 +39,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import TOP_K
-
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Retrieval hyperparameters
-# ---------------------------------------------------------------------------
-
-SEMANTIC_K    = 20    # chunks from semantic search
-BM25_K        = 20    # chunks from BM25 search
-RRF_K         = 60    # RRF dampening constant
-RRF_POOL      = 30    # candidates after RRF → into MMR
-MMR_POOL      = 20    # candidates after MMR → into reranker
-# Raised from 0.7 — strongly prefer relevance, only diversify when chunks are nearly equal
-MMR_LAMBDA    = 0.85  # MMR relevance/diversity tradeoff (0=diverse, 1=relevant)
+# Fixed structural constant — not admin-tunable. RRF_POOL determines how
+# many fused candidates flow into MMR; it should always be >= mmr_pool.
+# Kept generous so MMR has enough candidates to diversify from.
+RRF_POOL = 30
 
 
 # ---------------------------------------------------------------------------
 # RRF merger
 # ---------------------------------------------------------------------------
 
-def _reciprocal_rank_fusion(
-    semantic_results: list,
-    bm25_results: list,
-    k: int = RRF_K,
-) -> list:
+def _reciprocal_rank_fusion(semantic_results: list, bm25_results: list, k: int) -> list:
     """
     Merge semantic and BM25 results using Reciprocal Rank Fusion.
     Chunks appearing in both lists get additive score boost.
@@ -125,6 +119,7 @@ def _fetch_chunks_by_ids(chunk_ids: list) -> list:
 
 def retrieve(
     query: str,
+    user_id: int,
     top_k: int = None,
     document_ids: list = None,
 ) -> list:
@@ -133,39 +128,50 @@ def retrieve(
 
     Args:
         query        : The user's natural language question.
-        top_k        : Final chunks to return. Defaults to TOP_K in config.
+        top_k        : Final chunks to return. Defaults to the live
+                       'top_k' setting (admin-tunable).
         document_ids : Optional manual override for document scoping.
                        If None, smart routing determines the scope automatically.
 
     Returns:
         List of top_k chunk dicts ordered by reranker score, each containing:
-            id              : int
-            chunk_text      : str
-            filename        : str
-            chunk_number    : int
-            document_id     : int
-            similarity      : float   (semantic score)
-            bm25_score      : float
-            rrf_score       : float
-            mmr_score       : float
-            reranker_score  : float
-            routing         : dict    (routing decision metadata)
+            id, chunk_text, filename, chunk_number, document_id,
+    Execute the full retrieval pipeline:
+      Routing → Semantic (pgvector) → BM25 → RRF Fusion → MMR → Cross-Encoder
     """
     if not query or not query.strip():
         raise ValueError("Query cannot be empty.")
 
-    k = top_k if top_k is not None else TOP_K
+    from services.settings_service import get_setting
+
+    k             = top_k if top_k is not None else get_setting("top_k", user_id)
+    semantic_k    = get_setting("semantic_k", user_id)
+    bm25_k        = get_setting("bm25_k", user_id)
+    rrf_k         = get_setting("rrf_k", user_id)
+    mmr_pool      = get_setting("mmr_pool", user_id)
+    mmr_lambda    = get_setting("mmr_lambda", user_id)
+
     logger.info("Retrieval started for query: '%s'", query[:80])
+
+    from services.database_service import get_all_documents
+    user_docs = [d["id"] for d in get_all_documents(user_id)]
+    
+    if document_ids is None:
+        document_ids = user_docs
+    else:
+        document_ids = [d for d in document_ids if d in user_docs]
+
+    if not document_ids:
+        logger.info("No documents available for retrieval for this user.")
+        return []
 
     # ------------------------------------------------------------------
     # Step 1 — Smart Routing (auto document scoping)
     # ------------------------------------------------------------------
     routing_info = {"category": "general", "routed": False, "confidence": 0.0}
 
-    if document_ids is None:
-        from services.router_service import (
-            classify_query, get_document_ids_for_category, ROUTING_CONFIDENCE_THRESHOLD
-        )
+    if True: # Always run routing but scope within document_ids
+        from services.router_service import classify_query, get_document_ids_for_category
         routing_info = classify_query(query)
 
         if routing_info["routed"]:
@@ -183,14 +189,11 @@ def retrieve(
                     )
                 else:
                     # Low confidence → soft scope: prefer category but don't exclude others.
-                    # Search globally; category docs will naturally rank higher because
-                    # their content matches the routing keyword that triggered routing.
                     document_ids = None
                     routing_info["routed"] = False
                     routing_info["soft_scope"] = scoped_ids
                     logger.info(
-                        "Soft routing: category='%s' confidence=%.1f → global search "
-                        "(category docs preferred by relevance).",
+                        "Soft routing: category='%s' confidence=%.1f → global search.",
                         routing_info["category"], confidence,
                     )
             else:
@@ -211,7 +214,7 @@ def retrieve(
     query_vector    = embed_text(query)
     semantic_chunks = search_similar_chunks(
         query_embedding=query_vector,
-        top_k=SEMANTIC_K,
+        top_k=semantic_k,
         document_ids=document_ids,
     )
 
@@ -227,17 +230,15 @@ def retrieve(
 
     bm25_chunks = []
     if index_exists():
-        raw_bm25 = bm25_search(query, top_k=BM25_K, document_ids=document_ids)
+        raw_bm25 = bm25_search(query, top_k=bm25_k, document_ids=document_ids)
 
         semantic_ids     = {c["id"] for c in semantic_chunks}
         bm25_id_to_score = {c["id"]: c["bm25_score"] for c in raw_bm25}
 
-        # Add BM25 scores to chunks already in semantic results
         for c in semantic_chunks:
             if c["id"] in bm25_id_to_score:
                 c["bm25_score"] = bm25_id_to_score[c["id"]]
 
-        # Fetch full metadata for BM25-only chunks
         missing_ids = [c["id"] for c in raw_bm25 if c["id"] not in semantic_ids]
         if missing_ids:
             bm25_only = _fetch_chunks_by_ids(missing_ids)
@@ -246,16 +247,14 @@ def retrieve(
                 c["similarity"] = 0.0
             bm25_chunks = bm25_only
 
-        logger.info(
-            "BM25: %d chunks retrieved (%d new).", len(raw_bm25), len(bm25_chunks)
-        )
+        logger.info("BM25: %d chunks retrieved (%d new).", len(raw_bm25), len(bm25_chunks))
     else:
         logger.warning("BM25 index not found — semantic-only retrieval.")
 
     # ------------------------------------------------------------------
     # Step 4 — RRF Fusion
     # ------------------------------------------------------------------
-    fused = _reciprocal_rank_fusion(semantic_chunks, bm25_chunks)
+    fused = _reciprocal_rank_fusion(semantic_chunks, bm25_chunks, k=rrf_k)
 
     if not fused:
         logger.warning("No chunks after fusion.")
@@ -271,8 +270,8 @@ def retrieve(
         mmr_candidates = apply_mmr(
             query_embedding=query_vector,
             chunks=rrf_candidates,
-            top_k=MMR_POOL,
-            lambda_val=MMR_LAMBDA,
+            top_k=mmr_pool,
+            lambda_val=mmr_lambda,
         )
         logger.info(
             "MMR: %d candidates across %d unique docs.",
@@ -281,7 +280,7 @@ def retrieve(
         )
     except Exception as exc:
         logger.warning("MMR failed (%s) — using RRF order.", exc)
-        mmr_candidates = rrf_candidates[:MMR_POOL]
+        mmr_candidates = rrf_candidates[:mmr_pool]
         for c in mmr_candidates:
             c["mmr_score"] = c.get("rrf_score", 0.0)
 
@@ -292,15 +291,8 @@ def retrieve(
         from services.reranker_service import rerank
         reranked = rerank(query, mmr_candidates, top_k=len(mmr_candidates))
 
-        # Use top-K only — no hard score threshold.
-        # The reranker already orders correctly; a threshold adds no value
-        # and removes valid internal document chunks that score low on this
-        # web-trained model due to writing style differences.
         final_chunks = reranked[:k]
-        logger.info(
-            "Reranker: returning top %d of %d candidates.",
-            len(final_chunks), len(reranked),
-        )
+        logger.info("Reranker: returning top %d of %d candidates.", len(final_chunks), len(reranked))
 
     except Exception as exc:
         logger.warning("Reranker unavailable (%s) — using MMR order.", exc)
@@ -308,7 +300,6 @@ def retrieve(
             c["reranker_score"] = c.get("rrf_score", 0.0)
         final_chunks = mmr_candidates[:k]
 
-    # Attach routing info to each chunk for UI display
     for c in final_chunks:
         c["routing"] = routing_info
 

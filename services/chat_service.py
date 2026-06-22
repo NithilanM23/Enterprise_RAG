@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
-# Reduced from 6 — shorter history = shorter prompt = better small model attention
-HISTORY_WINDOW = 3   # last 3 messages = 1.5 exchanges
+# History window is now read live from services.settings_service
+# ('history_window' key) inside get_history_buffer() — no module constant.
 
 
 # ---------------------------------------------------------------------------
@@ -77,36 +77,36 @@ def ensure_chat_tables() -> None:
 # Session management
 # ---------------------------------------------------------------------------
 
-def create_session(title: str = "New Chat") -> dict:
+def create_session(user_id: int, title: str = "New Chat") -> dict:
     """
     Create a new chat session and return it.
 
     Returns:
-        dict with id, title, created_at, updated_at
+        dict with id, user_id, title, created_at, updated_at
     """
     import psycopg2.extras
     from services.database_service import _get_connection
 
     query = """
-        INSERT INTO chat_sessions (title, created_at, updated_at)
-        VALUES (%s, NOW(), NOW())
-        RETURNING id, title, created_at, updated_at;
+        INSERT INTO chat_sessions (user_id, title, created_at, updated_at)
+        VALUES (%s, %s, NOW(), NOW())
+        RETURNING id, user_id, title, created_at, updated_at;
     """
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (title,))
+            cur.execute(query, (user_id, title))
             row = dict(cur.fetchone())
 
-    logger.info("Created chat session id=%d title='%s'", row["id"], row["title"])
+    logger.info("Created chat session id=%d title='%s' user_id=%d", row["id"], row["title"], row["user_id"])
     return row
 
 
-def get_all_sessions() -> list:
+def get_all_sessions(user_id: int) -> list:
     """
     Return all sessions ordered by most recently updated first.
 
     Returns:
-        List of dicts: id, title, created_at, updated_at, message_count
+        List of dicts: id, user_id, title, created_at, updated_at, message_count
     """
     import psycopg2.extras
     from services.database_service import _get_connection
@@ -120,16 +120,17 @@ def get_all_sessions() -> list:
             COUNT(m.id) AS message_count
         FROM chat_sessions s
         LEFT JOIN chat_messages m ON m.session_id = s.id
+        WHERE s.user_id = %s
         GROUP BY s.id
         ORDER BY s.updated_at DESC;
     """
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query)
+            cur.execute(query, (user_id,))
             return [dict(r) for r in cur.fetchall()]
 
 
-def get_session(session_id: int) -> dict:
+def get_session(user_id: int, session_id: int) -> dict:
     """Return a single session dict or None if not found."""
     import psycopg2.extras
     from services.database_service import _get_connection
@@ -137,27 +138,27 @@ def get_session(session_id: int) -> dict:
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = %s;",
-                (session_id,)
+                "SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE id = %s AND user_id = %s;",
+                (session_id, user_id)
             )
             row = cur.fetchone()
             return dict(row) if row else None
 
 
-def rename_session(session_id: int, new_title: str) -> bool:
+def rename_session(user_id: int, session_id: int, new_title: str) -> bool:
     """Rename a session. Returns True if found and updated."""
     from services.database_service import _get_connection
 
     with _get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE chat_sessions SET title = %s, updated_at = NOW() WHERE id = %s RETURNING id;",
-                (new_title.strip()[:120], session_id)
+                "UPDATE chat_sessions SET title = %s, updated_at = NOW() WHERE id = %s AND user_id = %s RETURNING id;",
+                (new_title.strip()[:120], session_id, user_id)
             )
             return cur.fetchone() is not None
 
 
-def delete_session(session_id: int) -> bool:
+def delete_session(user_id: int, session_id: int) -> bool:
     """
     Delete a session and all its messages (CASCADE).
     Returns True if a session was deleted.
@@ -167,8 +168,8 @@ def delete_session(session_id: int) -> bool:
     with _get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM chat_sessions WHERE id = %s RETURNING id;",
-                (session_id,)
+                "DELETE FROM chat_sessions WHERE id = %s AND user_id = %s RETURNING id;",
+                (session_id, user_id)
             )
             deleted = cur.fetchone() is not None
 
@@ -177,7 +178,7 @@ def delete_session(session_id: int) -> bool:
     return deleted
 
 
-def auto_title_session(session_id: int, first_question: str) -> None:
+def auto_title_session(user_id: int, session_id: int, first_question: str) -> None:
     """
     Set the session title based on the first user question.
     Truncates to 60 characters for clean sidebar display.
@@ -185,7 +186,7 @@ def auto_title_session(session_id: int, first_question: str) -> None:
     title = first_question.strip()
     if len(title) > 60:
         title = title[:57] + "..."
-    rename_session(session_id, title)
+    rename_session(user_id, session_id, title)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +251,7 @@ def add_message(
     return msg
 
 
-def get_messages(session_id: int) -> list:
+def get_messages(user_id: int, session_id: int) -> list:
     """
     Return all messages in a session ordered by creation time.
 
@@ -264,12 +265,13 @@ def get_messages(session_id: int) -> list:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, session_id, role, content, sources, created_at
-                FROM chat_messages
-                WHERE session_id = %s
-                ORDER BY created_at ASC;
+                SELECT m.id, m.session_id, m.role, m.content, m.sources, m.created_at
+                FROM chat_messages m
+                JOIN chat_sessions s ON s.id = m.session_id
+                WHERE m.session_id = %s AND s.user_id = %s
+                ORDER BY m.created_at ASC;
                 """,
-                (session_id,)
+                (session_id, user_id)
             )
             rows = cur.fetchall()
 
@@ -289,14 +291,19 @@ def get_messages(session_id: int) -> list:
 
 def get_history_buffer(session_id: int) -> list:
     """
-    Return the last HISTORY_WINDOW messages formatted for LLM context injection.
+    Return the last N messages formatted for LLM context injection.
+    N comes from the live 'history_window' setting (admin-tunable,
+    no restart needed) — never a module-level constant.
 
     Returns:
         List of dicts: [{"role": "user"/"assistant", "content": str}, ...]
-        Most recent HISTORY_WINDOW messages, oldest first.
+        Most recent N messages, oldest first.
     """
     import psycopg2.extras
     from services.database_service import _get_connection
+    from services.settings_service import get_setting
+
+    window = get_setting("history_window")
 
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -308,12 +315,83 @@ def get_history_buffer(session_id: int) -> list:
                 ORDER BY created_at DESC
                 LIMIT %s;
                 """,
-                (session_id, HISTORY_WINDOW)
+                (session_id, window)
             )
             rows = cur.fetchall()
 
     # Reverse to get chronological order (oldest first)
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+def search_sessions(user_id: int, query: str, limit: int = 20) -> list:
+    """
+    Full-text search across session titles AND message content.
+    Powers the Ctrl+K command palette "jump to conversation" feature.
+
+    Returns sessions ranked by relevance, with a short snippet of the
+    matching message content so the frontend can show context in the
+    search results dropdown.
+
+    Returns:
+        List of dicts: {
+            session_id, title, snippet, matched_in ("title"|"message"),
+            updated_at
+        }
+    """
+    import psycopg2.extras
+    from services.database_service import _get_connection
+
+    if not query or not query.strip():
+        return []
+
+    like_pattern = f"%{query.strip()}%"
+
+    sql = """
+        WITH title_matches AS (
+            SELECT
+                s.id AS session_id, s.title, s.updated_at,
+                'title' AS matched_in,
+                s.title AS snippet
+            FROM chat_sessions s
+            WHERE s.title ILIKE %(pattern)s AND s.user_id = %(user_id)s
+        ),
+        message_matches AS (
+            SELECT
+                s.id AS session_id, s.title, s.updated_at,
+                'message' AS matched_in,
+                m.content  AS snippet
+            FROM chat_messages m
+            JOIN chat_sessions s ON s.id = m.session_id
+            WHERE m.content ILIKE %(pattern)s AND s.user_id = %(user_id)s
+        )
+        SELECT DISTINCT ON (session_id)
+            session_id, title, updated_at, matched_in, snippet
+        FROM (
+            SELECT * FROM title_matches
+            UNION ALL
+            SELECT * FROM message_matches
+        ) combined
+        ORDER BY session_id, updated_at DESC
+        LIMIT %(limit)s;
+    """
+
+    with _get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, {"pattern": like_pattern, "limit": limit, "user_id": user_id})
+            rows = [dict(r) for r in cur.fetchall()]
+
+    # Trim snippet to a short preview around the match
+    for r in rows:
+        snippet = r.get("snippet") or ""
+        if len(snippet) > 140:
+            idx = snippet.lower().find(query.lower())
+            start = max(0, idx - 40)
+            snippet = ("..." if start > 0 else "") + snippet[start:start + 140] + "..."
+        r["snippet"] = snippet
+
+    # Sort overall by recency
+    rows.sort(key=lambda r: r["updated_at"], reverse=True)
+    return rows[:limit]
 
 
 def clear_session_messages(session_id: int) -> None:

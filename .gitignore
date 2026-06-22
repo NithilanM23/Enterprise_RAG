@@ -27,3 +27,5 @@ Thumbs.db
 *.pkl
 
 uploads/
+
+frontend/node_modules

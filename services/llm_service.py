@@ -38,6 +38,12 @@ def _call_ollama(prompt: str) -> str:
     """
     Call the Ollama REST API directly using requests.
 
+    Model name, temperature, and num_predict are read live from
+    services.settings_service on every call — this is what lets the
+    admin settings panel swap the LLM model or generation parameters
+    without restarting the server. config.LLM_MODEL is only the
+    fallback default the very first time the app runs.
+
     Why not LangChain OllamaLLM:
       LangChain does not forward the `think` parameter to Ollama, so Qwen3
       thinking models return 0-char responses (they emit only thinking tokens
@@ -53,14 +59,19 @@ def _call_ollama(prompt: str) -> str:
     """
     import requests
     import json
+    from services.settings_service import get_setting
+
+    model       = get_setting("llm_model")
+    temperature = get_setting("temperature")
+    num_predict = get_setting("num_predict")
 
     payload = {
-        "model":  LLM_MODEL,
+        "model":  model,
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.1,
-            "num_predict": 1024,  # increased from 512 — prevents answer truncation
+            "temperature": temperature,
+            "num_predict": num_predict,
         },
         "think": False,   # suppresses <think> blocks for Qwen3 models
     }
@@ -88,7 +99,7 @@ def _call_ollama(prompt: str) -> str:
     except Exception as exc:
         raise RuntimeError(
             f"Ollama API error: {exc}\n"
-            f"Model: {LLM_MODEL}  |  URL: {OLLAMA_BASE_URL}"
+            f"Model: {model}  |  URL: {OLLAMA_BASE_URL}"
         )
 
 
@@ -200,9 +211,12 @@ def generate_answer(question: str, chunks: list, history: list = None) -> str:
 
     prompt = build_prompt(question, chunks, history=history)
 
+    from services.settings_service import get_setting
+    current_model = get_setting("llm_model")
+
     logger.info(
         "Generating answer with model '%s' — prompt length: %d chars.",
-        LLM_MODEL, len(prompt),
+        current_model, len(prompt),
     )
 
     try:
@@ -222,12 +236,64 @@ def generate_answer(question: str, chunks: list, history: list = None) -> str:
     except Exception as exc:
         raise RuntimeError(
             f"LLM generation failed.\n"
-            f"  Model      : {LLM_MODEL}\n"
+            f"  Model      : {current_model}\n"
             f"  Ollama URL : {OLLAMA_BASE_URL}\n"
             f"  Error      : {exc}\n\n"
             f"  Is Ollama running?  →  ollama serve\n"
-            f"  Is model pulled?    →  ollama pull {LLM_MODEL}"
+            f"  Is model pulled?    →  ollama pull {current_model}"
         ) from exc
+
+
+def generate_followups(question: str, answer: str, max_suggestions: int = 3) -> list:
+    """
+    Generate short follow-up questions based on the last Q&A pair.
+    Powers the "Smart Follow-up Suggestions" engagement feature —
+    shown as clickable chips below every assistant answer.
+
+    Uses a small, fast prompt (not the main retrieval prompt) so this
+    adds minimal latency. Failures are non-fatal — an empty list means
+    the frontend simply doesn't render the suggestion chips.
+
+    Args:
+        question : The user's original question.
+        answer   : The assistant's answer that was just generated.
+        max_suggestions : How many follow-ups to request.
+
+    Returns:
+        List of short question strings, e.g.
+        ["What floor is it on?", "What is the contact number?", ...]
+    """
+    prompt = f"""Based on this question and answer, suggest {max_suggestions} short, \
+natural follow-up questions a professional might ask next. Keep each under 12 words.
+
+Question: {question}
+Answer: {answer[:500]}
+
+Return ONLY a JSON array of strings, nothing else. Example:
+["What floor is it on?", "Is there parking available?", "What are the office hours?"]
+"""
+
+    try:
+        raw = _call_ollama(prompt).strip()
+        raw = _strip_thinking(raw)
+
+        # Extract JSON array even if the model added stray text around it
+        import re, json
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            return []
+
+        suggestions = json.loads(match.group(0))
+        if not isinstance(suggestions, list):
+            return []
+
+        # Clean and cap
+        cleaned = [str(s).strip().strip('"') for s in suggestions if str(s).strip()]
+        return cleaned[:max_suggestions]
+
+    except Exception as exc:
+        logger.warning("Follow-up suggestion generation failed (non-fatal): %s", exc)
+        return []
 
 
 def check_llm_connection() -> dict:
@@ -241,11 +307,14 @@ def check_llm_connection() -> dict:
         error       : str or None
     """
     import requests
+    from services.settings_service import get_setting
+
+    current_model = get_setting("llm_model")
 
     result = {
         "reachable":   False,
         "model_ready": False,
-        "model_name":  LLM_MODEL,
+        "model_name":  current_model,
         "error":       None,
     }
 
@@ -255,12 +324,12 @@ def check_llm_connection() -> dict:
         result["reachable"] = True
 
         models = [m["name"] for m in resp.json().get("models", [])]
-        result["model_ready"] = any(LLM_MODEL in m for m in models)
+        result["model_ready"] = any(current_model in m for m in models)
 
         if not result["model_ready"]:
             result["error"] = (
-                f"Model '{LLM_MODEL}' not found in Ollama.\n"
-                f"Run:  ollama pull {LLM_MODEL}"
+                f"Model '{current_model}' not found in Ollama.\n"
+                f"Run:  ollama pull {current_model}"
             )
 
     except requests.exceptions.ConnectionError:

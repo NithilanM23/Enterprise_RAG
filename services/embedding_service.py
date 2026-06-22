@@ -11,14 +11,19 @@ Responsibilities:
 Uses Ollama running locally — no internet, no API keys.
 
 Swapping the embedding model:
-  Change EMBEDDING_MODEL and EMBEDDING_DIMENSION in config.py.
-  That is the ONLY change needed — nothing in this file needs to be touched.
+  The model name is read live from services.settings_service on every
+  call — never a module-level constant. To swap models safely, use
+  services.settings_service.update_embedding_model(), NOT a direct
+  setting write. Changing the embedding model makes every existing
+  embedding meaningless (different vector space) — that function
+  handles nulling old embeddings and migrating the pgvector column
+  dimension if needed. See that module's docstring for details.
 
   Supported Ollama embedding models:
     mxbai-embed-large   -> dimension 1024  (default)
     nomic-embed-text    -> dimension 768
     bge-small           -> dimension 384
-    all-MiniLM-L6-v2   -> dimension 384
+    all-MiniLM-L6-v2    -> dimension 384
 
 IMPORTANT:
   The same model must always be used for both document and query embeddings.
@@ -32,7 +37,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import EMBEDDING_MODEL, OLLAMA_BASE_URL
+from config import OLLAMA_BASE_URL   # endpoint is structural, not swappable
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +46,20 @@ logger = logging.getLogger(__name__)
 # Ollama client initialisation
 # ---------------------------------------------------------------------------
 
-def _get_ollama_client():
+def _get_ollama_client(model: str = None):
     """
-    Return a LangChain OllamaEmbeddings instance configured from config.py.
-    Instantiated fresh per call — lightweight, stateless.
+    Return a LangChain OllamaEmbeddings instance.
+    Reads the live 'embedding_model' setting if no model is explicitly
+    passed. Instantiated fresh per call — lightweight, stateless.
     """
     from langchain_ollama import OllamaEmbeddings
 
+    if model is None:
+        from services.settings_service import get_setting
+        model = get_setting("embedding_model")
+
     return OllamaEmbeddings(
-        model=EMBEDDING_MODEL,
+        model=model,
         base_url=OLLAMA_BASE_URL,
     )
 
@@ -70,7 +80,7 @@ def embed_text(text: str) -> list:
 
     Returns:
         A list of floats representing the embedding vector.
-        Length matches EMBEDDING_DIMENSION in config.py.
+        Length matches the live 'embedding_dimension' setting.
 
     Raises:
         ValueError : If text is empty.
@@ -79,21 +89,24 @@ def embed_text(text: str) -> list:
     if not text or not text.strip():
         raise ValueError("Cannot embed empty text.")
 
-    logger.debug("Embedding single text (%d characters).", len(text))
+    from services.settings_service import get_setting
+    model = get_setting("embedding_model")
+
+    logger.debug("Embedding single text (%d characters) with model '%s'.", len(text), model)
 
     try:
-        client = _get_ollama_client()
+        client = _get_ollama_client(model)
         vector = client.embed_query(text)
         logger.debug("Embedding generated: dimension=%d.", len(vector))
         return vector
     except Exception as exc:
         raise RuntimeError(
             f"Embedding generation failed.\n"
-            f"  Model      : {EMBEDDING_MODEL}\n"
+            f"  Model      : {model}\n"
             f"  Ollama URL : {OLLAMA_BASE_URL}\n"
             f"  Error      : {exc}\n\n"
             f"  Is Ollama running?  →  ollama serve\n"
-            f"  Is model pulled?    →  ollama pull {EMBEDDING_MODEL}"
+            f"  Is model pulled?    →  ollama pull {model}"
         ) from exc
 
 
@@ -121,13 +134,13 @@ def embed_chunks(chunks: list, batch_size: int = 10) -> list:
         logger.warning("embed_chunks called with empty list.")
         return chunks
 
-    total = len(chunks)
-    logger.info(
-        "Generating embeddings for %d chunks using model '%s'.",
-        total, EMBEDDING_MODEL,
-    )
+    from services.settings_service import get_setting
+    model = get_setting("embedding_model")
 
-    client = _get_ollama_client()
+    total = len(chunks)
+    logger.info("Generating embeddings for %d chunks using model '%s'.", total, model)
+
+    client = _get_ollama_client(model)
     embedded_count = 0
 
     for batch_start in range(0, total, batch_size):
@@ -151,11 +164,11 @@ def embed_chunks(chunks: list, batch_size: int = 10) -> list:
         except Exception as exc:
             raise RuntimeError(
                 f"Embedding failed at chunk {batch_start}–{batch_start + len(batch)}.\n"
-                f"  Model      : {EMBEDDING_MODEL}\n"
+                f"  Model      : {model}\n"
                 f"  Ollama URL : {OLLAMA_BASE_URL}\n"
                 f"  Error      : {exc}\n\n"
                 f"  Is Ollama running?  →  ollama serve\n"
-                f"  Is model pulled?    →  ollama pull {EMBEDDING_MODEL}"
+                f"  Is model pulled?    →  ollama pull {model}"
             ) from exc
 
     logger.info("All %d embeddings generated successfully.", total)
@@ -173,31 +186,29 @@ def check_ollama_connection() -> dict:
         error        : str or None
     """
     import requests
+    from services.settings_service import get_setting
+
+    model = get_setting("embedding_model")
 
     result = {
         "reachable":   False,
         "model_ready": False,
-        "model_name":  EMBEDDING_MODEL,
+        "model_name":  model,
         "error":       None,
     }
 
     try:
-        # Check if Ollama server is up
         resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         resp.raise_for_status()
         result["reachable"] = True
 
-        # Check if our model is in the list
         models = [m["name"] for m in resp.json().get("models", [])]
-        # Ollama model names may include tags like "mxbai-embed-large:latest"
-        result["model_ready"] = any(
-            EMBEDDING_MODEL in m for m in models
-        )
+        result["model_ready"] = any(model in m for m in models)
 
         if not result["model_ready"]:
             result["error"] = (
-                f"Model '{EMBEDDING_MODEL}' not found in Ollama.\n"
-                f"Run:  ollama pull {EMBEDDING_MODEL}"
+                f"Model '{model}' not found in Ollama.\n"
+                f"Run:  ollama pull {model}"
             )
 
     except requests.exceptions.ConnectionError:

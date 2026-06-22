@@ -267,13 +267,9 @@ def do_ingest(uploaded_file, category="general"):
         if f".{ext}" in EXCEL_EXTENSIONS:
             from services.excel_service import ingest_excel
 
-            # Metadata from bytes — no second file open
+            # Extract metadata — uses BytesIO internally, no double file open
             try:
-                file_bytes.seek(0)
-                extract_metadata_bytes = __import__(
-                    "services.metadata_service", fromlist=["extract_metadata"]
-                ).extract_metadata
-                extract_metadata_bytes(str(dest_path.resolve()), doc_id)
+                extract_metadata(str(dest_path.resolve()), doc_id)
             except Exception:
                 pass
 
@@ -578,7 +574,7 @@ if page == "💬 Chat":
                 if data:
                     routing = data[0].get("routing", {})
                     if routing.get("routed"):
-                        from services.router_service import get_category_description
+                        from services.category_service import get_category_description
                         cat = get_category_description(routing["category"])
                         st.caption(
                             f"Auto-routed → {cat} "
@@ -838,7 +834,7 @@ elif page == "📂 My Documents":
         for doc in docs:
             c1, c2, c3 = st.columns([5, 2, 1])
             with c1:
-                from services.router_service import get_category_description
+                from services.category_service import get_category_description
                 cat_label = get_category_description(doc.get("category", "general"))
                 st.markdown(f"**📄 {doc['filename']}**")
                 st.markdown(
@@ -904,15 +900,30 @@ elif page == "⬆️ Upload":
     )
 
     if uploaded_files:
-        from services.router_service import get_all_categories, get_category_description
-        cat_options = ["general"] + get_all_categories()
-        cat_labels  = {c: get_category_description(c) for c in cat_options}
-        selected_cat = st.selectbox(
-            "Document category",
-            options=cat_options,
-            format_func=lambda c: cat_labels[c],
-            help="Categorised documents are searched first for matching queries",
-        )
+        from services.category_service import list_categories, create_category
+        cats = list_categories(include_doc_counts=False)
+        cat_options = [c["name"] for c in cats]
+        cat_labels  = {c["name"]: c["label"] for c in cats}
+
+        col_cat, col_new = st.columns([3, 2])
+        with col_cat:
+            selected_cat = st.selectbox(
+                "Document category",
+                options=cat_options,
+                format_func=lambda c: cat_labels.get(c, c),
+                help="Categorised documents are searched first for matching queries",
+            )
+        with col_new:
+            new_cat_label = st.text_input(
+                "Or create new category",
+                placeholder="e.g. Quality Control",
+                help="Type a name to create a custom category and use it for this upload",
+            )
+        # If user typed a new category name, that takes priority
+        if new_cat_label.strip():
+            cat_obj    = create_category(new_cat_label.strip())
+            selected_cat = cat_obj["name"]
+            st.success(f"Category created: **{cat_obj['label']}**")
 
         if st.button("⬆️ Ingest Selected Files", type="primary"):
             results = []
