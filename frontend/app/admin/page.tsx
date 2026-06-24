@@ -3,39 +3,40 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Settings, RefreshCw, AlertTriangle, CheckCircle, Tag, Plus, Trash2, Zap } from 'lucide-react';
 import { admin as adminApi, categories as catsApi } from '@/utils/api';
-import { useAuth } from '../context/AuthContext';
+import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 
 const SAFE_SETTINGS = [
-  { key: 'chunk_size',                   label: 'Chunk Size',                   type: 'int',   hint: 'Characters per chunk. Re-ingest documents after changing.' },
-  { key: 'chunk_overlap',               label: 'Chunk Overlap',               type: 'int',   hint: 'Overlap between adjacent chunks.' },
-  { key: 'top_k',                       label: 'Top K Results',               type: 'int',   hint: 'Final chunks sent to LLM per query (3–10).' },
-  { key: 'semantic_k',                  label: 'Semantic K',                  type: 'int',   hint: 'Candidates from vector search.' },
-  { key: 'bm25_k',                      label: 'BM25 K',                      type: 'int',   hint: 'Candidates from keyword search.' },
-  { key: 'mmr_pool',                    label: 'MMR Pool',                    type: 'int',   hint: 'Candidates entering MMR diversification.' },
-  { key: 'mmr_lambda',                  label: 'MMR Lambda',                  type: 'float', hint: '0 = diverse, 1 = relevant. Default 0.85.' },
-  { key: 'history_window',              label: 'History Window',              type: 'int',   hint: 'Previous messages injected into each prompt.' },
-  { key: 'num_predict',                 label: 'Max Tokens (num_predict)',     type: 'int',   hint: 'Maximum LLM output tokens per response.' },
-  { key: 'temperature',                 label: 'Temperature',                 type: 'float', hint: '0 = deterministic, 1 = creative. Default 0.1.' },
-  { key: 'routing_confidence_threshold', label: 'Routing Threshold',          type: 'float', hint: 'Min score to hard-scope search to a category.' },
+  { key: 'chunk_size', label: 'Chunk Size', type: 'int', hint: 'Characters per chunk. Re-ingest documents after changing.' },
+  { key: 'chunk_overlap', label: 'Chunk Overlap', type: 'int', hint: 'Overlap between adjacent chunks.' },
+  { key: 'top_k', label: 'Top K Results', type: 'int', hint: 'Final chunks sent to LLM per query (3–10).' },
+  { key: 'semantic_k', label: 'Semantic K', type: 'int', hint: 'Candidates from vector search.' },
+  { key: 'bm25_k', label: 'BM25 K', type: 'int', hint: 'Candidates from keyword search.' },
+  { key: 'mmr_pool', label: 'MMR Pool', type: 'int', hint: 'Candidates entering MMR diversification.' },
+  { key: 'mmr_lambda', label: 'MMR Lambda', type: 'float', hint: '0 = diverse, 1 = relevant. Default 0.85.' },
+  { key: 'history_window', label: 'History Window', type: 'int', hint: 'Previous messages injected into each prompt.' },
+  { key: 'num_predict', label: 'Max Tokens (num_predict)', type: 'int', hint: 'Maximum LLM output tokens per response.' },
+  { key: 'temperature', label: 'Temperature', type: 'float', hint: '0 = deterministic, 1 = creative. Default 0.1.' },
+  { key: 'routing_confidence_threshold', label: 'Routing Threshold', type: 'float', hint: 'Min score to hard-scope search to a category.' },
 ];
 
 export default function AdminPage() {
-  const { username } = useAuth();
+  const { data: session } = useSession();
+  const username = session?.user?.name || '';
   const router = useRouter();
-  const [settings,      setSettings]      = useState<any>({});
-  const [ollamaModels,  setOllamaModels]  = useState<string[]>([]);
+  const [settings, setSettings] = useState<any>({});
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [localSettings, setLocalSettings] = useState<any>({});
-  const [cats,          setCats]          = useState<any[]>([]);
-  const [newCatLabel,   setNewCatLabel]   = useState('');
-  const [newCatKw,      setNewCatKw]      = useState('');
-  const [queue,         setQueue]         = useState<any>(null);
-  const [toast,         setToast]         = useState<{ msg: string; type?: string } | null>(null);
-  const [saving,        setSaving]        = useState(false);
-  const [llmSwapping,   setLlmSwapping]   = useState(false);
-  const [embedPreview,  setEmbedPreview]  = useState<any>(null);
+  const [cats, setCats] = useState<any[]>([]);
+  const [newCatLabel, setNewCatLabel] = useState('');
+  const [newCatKw, setNewCatKw] = useState('');
+  const [queue, setQueue] = useState<any>(null);
+  const [toast, setToast] = useState<{ msg: string; type?: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [llmSwapping, setLlmSwapping] = useState(false);
+  const [embedPreview, setEmbedPreview] = useState<any>(null);
   const [newEmbedModel, setNewEmbedModel] = useState('');
-  const [newEmbedDim,   setNewEmbedDim]   = useState('');
+  const [newEmbedDim, setNewEmbedDim] = useState('');
 
   const showToast = (msg: string, type = 'success') => {
     setToast({ msg, type });
@@ -54,7 +55,7 @@ export default function AdminPage() {
       setOllamaModels(s.available_ollama_models ?? []);
       setCats(c);
       setQueue(q);
-    } catch {}
+    } catch { }
   }, []);
 
   useEffect(() => { load(); }, [load]);
