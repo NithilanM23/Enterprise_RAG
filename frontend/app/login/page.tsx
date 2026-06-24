@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { signIn } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 import { auth } from '@/utils/api';
 import { Brain, Lock, User, AlertCircle } from 'lucide-react';
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const router = useRouter();
   const [isRegistering, setIsRegistering] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -25,11 +26,16 @@ export default function LoginPage() {
         setPassword('');
         setError('Registration successful! Please log in.');
       } else {
-        const formData = new FormData();
-        formData.append('username', username);
-        formData.append('password', password);
-        const data = await auth.login(formData);
-        login(data.access_token, data.user_id, data.username);
+        const result = await signIn('credentials', {
+          redirect: false,
+          username,
+          password,
+        });
+        if (result?.error) {
+          setError('Invalid username or password');
+        } else {
+          router.push('/');
+        }
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred. Please try again.');

@@ -1,9 +1,10 @@
-// utils/api.ts — typed API wrapper for the FastAPI backend
+import { getSession } from 'next-auth/react';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const session = await getSession();
+  const token = (session as any)?.accessToken;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -13,8 +14,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     if (res.status === 401 && typeof window !== 'undefined') {
-      localStorage.removeItem('token');
-      window.location.href = '/login';
+      window.location.href = '/api/auth/signin';
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `HTTP ${res.status}`);
@@ -45,12 +45,13 @@ export const health = {
 export const documents = {
   list: () => request<any[]>('/api/documents'),
 
-  upload: (file: File, category: string, newCategoryLabel?: string) => {
+  upload: async (file: File, category: string, newCategoryLabel?: string) => {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('category', category);
     if (newCategoryLabel) fd.append('new_category_label', newCategoryLabel);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    const session = await getSession();
+    const token = (session as any)?.accessToken;
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     
@@ -117,44 +118,47 @@ export function streamAsk(
   onError: (msg: string) => void
 ): AbortController {
   const controller = new AbortController();
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  fetch(`${API}/api/chat/ask`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ session_id: sessionId, question, document_ids: documentIds }),
-    signal: controller.signal,
-  }).then(async (res) => {
-    if (!res.ok) {
-      onError(`Server error ${res.status}`);
-      return;
-    }
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+  getSession().then((session) => {
+    const token = (session as any)?.accessToken;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(trimmed.slice(6));
-          onEvent(evt);
-          if (evt.type === 'done') onDone();
-        } catch {}
+    fetch(`${API}/api/chat/ask`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ session_id: sessionId, question, document_ids: documentIds }),
+      signal: controller.signal,
+    }).then(async (res) => {
+      if (!res.ok) {
+        onError(`Server error ${res.status}`);
+        return;
       }
-    }
-  }).catch((err) => {
-    if (err.name !== 'AbortError') onError(err.message);
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(trimmed.slice(6));
+            onEvent(evt);
+            if (evt.type === 'done') onDone();
+          } catch {}
+        }
+      }
+    }).catch((err) => {
+      if (err.name !== 'AbortError') onError(err.message);
+    });
   });
 
   return controller;
@@ -173,10 +177,11 @@ export const saved = {
 // ── Data Explorer ─────────────────────────────────────────────────────────
 
 export const explorer = {
-  upload: (file: File) => {
+  upload: async (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    const session = await getSession();
+    const token = (session as any)?.accessToken;
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return fetch(`${API}/api/explorer/upload`, { method: 'POST', headers, body: fd }).then(r => r.json());

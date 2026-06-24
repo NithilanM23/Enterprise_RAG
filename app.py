@@ -151,13 +151,13 @@ def get_embedding_status():
 
 def load_sessions():
     from services.chat_service import get_all_sessions
-    return get_all_sessions()
+    return get_all_sessions(1)
 
 def ensure_active_session():
     """Create a new session if none is active."""
     if "active_session_id" not in st.session_state or st.session_state.active_session_id is None:
         from services.chat_service import create_session
-        session = create_session("New Chat")
+        session = create_session(1, "New Chat")
         st.session_state.active_session_id = session["id"]
 
 def switch_session(session_id: int):
@@ -407,7 +407,7 @@ with st.sidebar:
         # New chat button
         if st.button("＋ New Chat", use_container_width=True):
             from services.chat_service import create_session
-            session = create_session("New Chat")
+            session = create_session(1, "New Chat")
             st.session_state.active_session_id = session["id"]
             st.rerun()
 
@@ -427,7 +427,7 @@ with st.sidebar:
             with col2:
                 if st.button("🗑", key=f"del_sess_{s['id']}", help="Delete session"):
                     from services.chat_service import delete_session
-                    delete_session(s["id"])
+                    delete_session(1, s["id"])
                     if st.session_state.get("active_session_id") == s["id"]:
                         st.session_state.active_session_id = None
                     st.rerun()
@@ -453,8 +453,8 @@ if page == "💬 Chat":
         add_message, auto_title_session, clear_session_messages
     )
 
-    session     = get_session(session_id)
-    messages    = get_messages(session_id)
+    session     = get_session(1, session_id)
+    messages    = get_messages(1, session_id)
 
     # Session header
     col_title, col_clear = st.columns([6, 1])
@@ -535,7 +535,7 @@ if page == "💬 Chat":
             add_message(session_id, "user", q)
 
             if not messages:
-                auto_title_session(session_id, q)
+                auto_title_session(1, session_id, q)
 
             with st.spinner("Thinking..."):
                 answer, data, meta = do_ask(q, history, document_ids=selected_doc_ids)

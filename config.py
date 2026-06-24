@@ -59,7 +59,7 @@ EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 # Swap the model name here to change the LLM globally.
 #
 # Recommended CPU-only models (via Ollama):
-#   qwen2.5:3b    (default — good quality, ~2GB RAM)
+#   qwen3.5:0.8b    (default — good quality, ~2GB RAM)
 #   phi3:mini     (faster, slightly lower quality)
 #   llama3.2:3b   (alternative)
 # ---------------------------------------------------------------------------

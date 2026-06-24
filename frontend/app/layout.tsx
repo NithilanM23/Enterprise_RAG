@@ -12,14 +12,22 @@ import {
 import { sessions as sessionsApi } from '@/utils/api';
 import CommandPalette from '@/components/CommandPalette';
 
-import { AuthProvider, useAuth } from './context/AuthContext';
+import { Providers } from './providers';
+import { useSession, signOut } from 'next-auth/react';
 
 function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname  = usePathname();
   const router    = useRouter();
   const [sessions, setSessions]   = useState<any[]>([]);
   const [palette,  setPalette]    = useState(false);
-  const { logout, username } = useAuth();
+  const { data: session, status } = useSession();
+  const username = session?.user?.name || '';
+
+  useEffect(() => {
+    if (status === 'unauthenticated' && pathname !== '/login') {
+      router.push('/login');
+    }
+  }, [status, pathname, router]);
 
   const loadSessions = useCallback(async () => {
     try { setSessions(await sessionsApi.list()); } catch {}
@@ -169,7 +177,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <div style={{ fontSize: '13px', color: 'var(--text-mute)' }}>
             User: <strong>{username}</strong>
           </div>
-          <button onClick={logout} style={{ background: 'none', border: 'none', color: 'var(--text-mute)', cursor: 'pointer', fontSize: '13px' }}>
+          <button onClick={() => signOut()} style={{ background: 'none', border: 'none', color: 'var(--text-mute)', cursor: 'pointer', fontSize: '13px' }}>
             Logout
           </button>
         </div>
@@ -200,9 +208,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body>
-        <AuthProvider>
+        <Providers>
           <AppLayout>{children}</AppLayout>
-        </AuthProvider>
+        </Providers>
       </body>
     </html>
   );
