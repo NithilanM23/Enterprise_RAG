@@ -122,6 +122,7 @@ def initialize_database() -> None:
     _ensure_pgvector_extension()
     _ensure_tables()
     _migrate_add_category_column()
+    _migrate_multi_embedding()
 
     # Chat session tables
     from services.chat_service import ensure_chat_tables
@@ -192,6 +193,32 @@ def _migrate_add_category_column() -> None:
             """)
     logger.debug("Migration: category column ensured on documents table.")
 
+def _migrate_multi_embedding() -> None:
+    """Migrate the embeddings table to support multiple embedding models."""
+    from services.settings_service import get_setting
+    default_model = get_setting("embedding_model")
+    
+    with _get_raw_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE embeddings
+                ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+            """)
+            
+            cur.execute("""
+                UPDATE embeddings 
+                SET embedding_model = %s 
+                WHERE embedding_model IS NULL AND embedding IS NOT NULL;
+            """, (default_model,))
+            
+            cur.execute("""
+                ALTER TABLE embeddings 
+                ALTER COLUMN embedding TYPE vector;
+            """)
+            
+            cur.execute("DROP INDEX IF EXISTS embeddings_hnsw_idx;")
+    logger.debug("Migration: multi-embedding support ensured.")
+
 
 def _ensure_pgvector_extension() -> None:
     """
@@ -228,14 +255,15 @@ def _ensure_tables() -> None:
         );
     """
 
-    # The vector dimension is read from config — no hardcoding here.
+    # The vector dimension is no longer hardcoded here.
     create_embeddings = f"""
         CREATE TABLE IF NOT EXISTS embeddings (
             id           SERIAL PRIMARY KEY,
             document_id  INTEGER  NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
             chunk_number INTEGER  NOT NULL,
             chunk_text   TEXT     NOT NULL,
-            embedding    vector({EMBEDDING_DIMENSION}),
+            embedding    vector,
+            embedding_model TEXT,
             CONSTRAINT embeddings_doc_chunk_unique UNIQUE (document_id, chunk_number)
         );
     """
@@ -357,7 +385,7 @@ def insert_embeddings(document_id: int, chunks: list[dict]) -> None:
         return
 
     query = """
-        INSERT INTO embeddings (document_id, chunk_number, chunk_text, embedding)
+        INSERT INTO embeddings (document_id, chunk_number, chunk_text, embedding, embedding_model)
         VALUES %s
         ON CONFLICT (document_id, chunk_number) DO NOTHING;
     """
@@ -368,6 +396,7 @@ def insert_embeddings(document_id: int, chunks: list[dict]) -> None:
             c["chunk_number"],
             c["chunk_text"],
             c.get("embedding"),   # None is fine — embedding column is nullable
+            c.get("embedding_model"),
         )
         for c in chunks
     ]
@@ -387,37 +416,31 @@ def insert_embeddings(document_id: int, chunks: list[dict]) -> None:
             )
 
     if has_vectors:
-        _ensure_hnsw_index()
+        model = chunks[0].get("embedding_model")
+        dim = chunks[0].get("embedding_dimension")
+        if model and dim:
+            _ensure_hnsw_index(model, dim)
     # BM25 rebuild is NOT called here — it is called by the app layer
     # (do_ingest / generate_embeddings) after all operations complete.
     # This keeps insert_embeddings focused and avoids masking insert errors.
 
-def _ensure_hnsw_index() -> None:
+def _ensure_hnsw_index(model: str, dimension: int) -> None:
     """
-    Create an HNSW index on the embedding column if it does not already exist.
-
-    Why HNSW over IVFFlat (pgvector 0.8.2+):
-      - Works at ANY dataset size — no minimum row count.
-      - No 'lists' tuning parameter required.
-      - Better recall at equivalent query speed.
-      - Index is maintained incrementally on INSERT — no rebuild needed.
-
-    HNSW parameters used:
-      m              = 16   (connections per layer; 16 is the recommended default)
-      ef_construction = 64  (build-time accuracy; higher = better index, slower build)
-
-    For CPU-only use these defaults are well-balanced.
-    Increase ef_construction to 128 for higher recall if build time is acceptable.
+    Create a partial HNSW index on the embedding column for a specific model.
     """
+    sanitized_model = "".join(c if c.isalnum() else "_" for c in model)
+    index_name = f"embeddings_hnsw_{sanitized_model}_idx"
+
     with _get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS embeddings_hnsw_idx
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {index_name}
                 ON embeddings
-                USING hnsw (embedding vector_cosine_ops)
+                USING hnsw ((embedding::vector({dimension})) vector_cosine_ops)
+                WHERE embedding_model = '{model}'
                 WITH (m = 16, ef_construction = 64);
             """)
-    logger.debug("HNSW index ensured on embeddings.embedding.")
+    logger.debug("HNSW index ensured on embeddings for model '%s'.", model)
 
 
 def get_chunks_for_document(doc_id: int) -> list[dict]:
@@ -439,50 +462,78 @@ def get_chunks_for_document(doc_id: int) -> list[dict]:
 # Semantic retrieval
 # ---------------------------------------------------------------------------
 
+def get_active_embedding_models(document_ids: list = None) -> list[str]:
+    """Return a list of embedding models used by the specified documents."""
+    if document_ids:
+        query = """
+            SELECT DISTINCT embedding_model 
+            FROM embeddings 
+            WHERE document_id = ANY(%s) AND embedding_model IS NOT NULL;
+        """
+        params = (document_ids,)
+    else:
+        query = """
+            SELECT DISTINCT embedding_model 
+            FROM embeddings 
+            WHERE embedding_model IS NOT NULL;
+        """
+        params = ()
+
+    with _get_raw_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            return [r[0] for r in rows]
+
 def search_similar_chunks(
-    query_embedding: list,
+    query_embeddings: dict,
     top_k: int = 5,
     document_ids: list = None,
 ) -> list:
     """
-    Find the top_k most semantically similar chunks using cosine similarity.
+    Find the top_k most semantically similar chunks for EACH active model using cosine similarity.
 
     Args:
-        query_embedding : The query vector.
-        top_k           : Number of results to return.
+        query_embeddings : A dict mapping model_name -> query vector.
+        top_k           : Number of results to return PER MODEL.
         document_ids    : Optional list of document IDs to scope the search.
-                          If None, searches across ALL documents.
-                          Pass a list of IDs to restrict to specific documents.
     """
-    if document_ids:
-        query = """
-            SELECT e.id, e.chunk_text, e.chunk_number, e.document_id,
-                   d.filename,
-                   1 - (e.embedding <=> %s::vector) AS similarity
-            FROM embeddings e
-            JOIN documents d ON d.id = e.document_id
-            WHERE e.document_id = ANY(%s)
-            ORDER BY e.embedding <=> %s::vector
-            LIMIT %s;
-        """
-        params = (query_embedding, document_ids, query_embedding, top_k)
-    else:
-        query = """
-            SELECT e.id, e.chunk_text, e.chunk_number, e.document_id,
-                   d.filename,
-                   1 - (e.embedding <=> %s::vector) AS similarity
-            FROM embeddings e
-            JOIN documents d ON d.id = e.document_id
-            ORDER BY e.embedding <=> %s::vector
-            LIMIT %s;
-        """
-        params = (query_embedding, query_embedding, top_k)
+    results = {}
+    for model, query_embedding in query_embeddings.items():
+        if document_ids:
+            query = """
+                SELECT e.id, e.chunk_text, e.chunk_number, e.document_id,
+                       d.filename,
+                       1 - (e.embedding <=> %s::vector) AS similarity,
+                       e.embedding_model
+                FROM embeddings e
+                JOIN documents d ON d.id = e.document_id
+                WHERE e.document_id = ANY(%s) AND e.embedding_model = %s
+                ORDER BY e.embedding <=> %s::vector
+                LIMIT %s;
+            """
+            params = (query_embedding, document_ids, model, query_embedding, top_k)
+        else:
+            query = """
+                SELECT e.id, e.chunk_text, e.chunk_number, e.document_id,
+                       d.filename,
+                       1 - (e.embedding <=> %s::vector) AS similarity,
+                       e.embedding_model
+                FROM embeddings e
+                JOIN documents d ON d.id = e.document_id
+                WHERE e.embedding_model = %s
+                ORDER BY e.embedding <=> %s::vector
+                LIMIT %s;
+            """
+            params = (query_embedding, model, query_embedding, top_k)
 
-    with _get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]
+        with _get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                results[model] = [dict(r) for r in rows]
+                
+    return results
 
 # ---------------------------------------------------------------------------
 # Health check

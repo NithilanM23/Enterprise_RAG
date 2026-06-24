@@ -51,24 +51,20 @@ RRF_POOL = 30
 # RRF merger
 # ---------------------------------------------------------------------------
 
-def _reciprocal_rank_fusion(semantic_results: list, bm25_results: list, k: int) -> list:
+def _reciprocal_rank_fusion(result_lists: list, k: int) -> list:
     """
-    Merge semantic and BM25 results using Reciprocal Rank Fusion.
-    Chunks appearing in both lists get additive score boost.
+    Merge multiple ranked results using Reciprocal Rank Fusion.
+    Chunks appearing in multiple lists get additive score boost.
     """
     rrf_scores = {}
     chunk_map  = {}
 
-    for rank, chunk in enumerate(semantic_results, start=1):
-        cid = chunk["id"]
-        rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k + rank)
-        chunk_map[cid]  = chunk
-
-    for rank, chunk in enumerate(bm25_results, start=1):
-        cid = chunk["id"]
-        rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k + rank)
-        if cid not in chunk_map:
-            chunk_map[cid] = chunk
+    for results in result_lists:
+        for rank, chunk in enumerate(results, start=1):
+            cid = chunk["id"]
+            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (k + rank)
+            if cid not in chunk_map:
+                chunk_map[cid]  = chunk
 
     fused = []
     for cid, score in rrf_scores.items():
@@ -79,38 +75,11 @@ def _reciprocal_rank_fusion(semantic_results: list, bm25_results: list, k: int) 
     fused.sort(key=lambda x: x["rrf_score"], reverse=True)
 
     logger.info(
-        "RRF: %d semantic + %d BM25 → %d unique candidates.",
-        len(semantic_results), len(bm25_results), len(fused),
+        "RRF: Merged %d lists → %d unique candidates.",
+        len(result_lists), len(fused),
     )
     return fused
 
-
-# ---------------------------------------------------------------------------
-# Helper: fetch full chunk metadata for BM25-only results
-# ---------------------------------------------------------------------------
-
-def _fetch_chunks_by_ids(chunk_ids: list) -> list:
-    """Fetch full chunk metadata from DB for chunks only found by BM25."""
-    import psycopg2.extras
-    from services.database_service import _get_connection
-
-    if not chunk_ids:
-        return []
-
-    with _get_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT e.id, e.chunk_text, e.chunk_number, e.document_id,
-                       d.filename
-                FROM embeddings e
-                JOIN documents d ON d.id = e.document_id
-                WHERE e.id = ANY(%s);
-            """, (chunk_ids,))
-            rows = [dict(r) for r in cur.fetchall()]
-
-    for r in rows:
-        r["similarity"] = 0.0
-    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -209,52 +178,58 @@ def retrieve(
     # Step 2 — Semantic search
     # ------------------------------------------------------------------
     from services.embedding_service import embed_text
-    from services.database_service import search_similar_chunks
+    from services.database_service import search_similar_chunks, get_active_embedding_models
 
-    query_vector    = embed_text(query)
-    semantic_chunks = search_similar_chunks(
-        query_embedding=query_vector,
-        top_k=semantic_k,
-        document_ids=document_ids,
-    )
+    active_models = get_active_embedding_models(document_ids)
+    if not active_models:
+        from services.settings_service import get_setting
+        active_models = [get_setting("embedding_model")]
+        logger.info("No active embedding models found. Falling back to default %s", active_models[0])
+        
+    query_embeddings = {}
+    for model in active_models:
+        try:
+            query_embeddings[model] = embed_text(query, model=model)
+        except Exception as exc:
+            logger.warning("Failed to generate query embedding for model %s: %s", model, exc)
 
-    for c in semantic_chunks:
-        c.setdefault("bm25_score", 0.0)
+    if query_embeddings:
+        semantic_chunks_dict = search_similar_chunks(
+            query_embeddings=query_embeddings,
+            top_k=semantic_k,
+            document_ids=document_ids,
+        )
+    else:
+        semantic_chunks_dict = {}
 
-    logger.info("Semantic: %d chunks retrieved.", len(semantic_chunks))
+    all_semantic_chunks = []
+    for model, chunks in semantic_chunks_dict.items():
+        for c in chunks:
+            c.setdefault("bm25_score", 0.0)
+        all_semantic_chunks.extend(chunks)
+
+    logger.info("Semantic: retrieved %d chunks across %d models.", len(all_semantic_chunks), len(semantic_chunks_dict))
 
     # ------------------------------------------------------------------
     # Step 3 — BM25 keyword search
     # ------------------------------------------------------------------
     from services.bm25_service import search as bm25_search, index_exists
 
-    bm25_chunks = []
+    raw_bm25 = []
     if index_exists():
         raw_bm25 = bm25_search(query, top_k=bm25_k, document_ids=document_ids)
-
-        semantic_ids     = {c["id"] for c in semantic_chunks}
-        bm25_id_to_score = {c["id"]: c["bm25_score"] for c in raw_bm25}
-
-        for c in semantic_chunks:
-            if c["id"] in bm25_id_to_score:
-                c["bm25_score"] = bm25_id_to_score[c["id"]]
-
-        missing_ids = [c["id"] for c in raw_bm25 if c["id"] not in semantic_ids]
-        if missing_ids:
-            bm25_only = _fetch_chunks_by_ids(missing_ids)
-            for c in bm25_only:
-                c["bm25_score"] = bm25_id_to_score.get(c["id"], 0.0)
-                c["similarity"] = 0.0
-            bm25_chunks = bm25_only
-
-        logger.info("BM25: %d chunks retrieved (%d new).", len(raw_bm25), len(bm25_chunks))
+        logger.info("BM25: %d chunks retrieved.", len(raw_bm25))
     else:
         logger.warning("BM25 index not found — semantic-only retrieval.")
 
     # ------------------------------------------------------------------
     # Step 4 — RRF Fusion
     # ------------------------------------------------------------------
-    fused = _reciprocal_rank_fusion(semantic_chunks, bm25_chunks, k=rrf_k)
+    lists_to_fuse = list(semantic_chunks_dict.values())
+    if raw_bm25:
+        lists_to_fuse.append(raw_bm25)
+        
+    fused = _reciprocal_rank_fusion(lists_to_fuse, k=rrf_k)
 
     if not fused:
         logger.warning("No chunks after fusion.")
@@ -265,24 +240,29 @@ def retrieve(
     # ------------------------------------------------------------------
     # Step 5 — MMR Diversification
     # ------------------------------------------------------------------
-    try:
-        from services.mmr_service import apply_mmr
-        mmr_candidates = apply_mmr(
-            query_embedding=query_vector,
-            chunks=rrf_candidates,
-            top_k=mmr_pool,
-            lambda_val=mmr_lambda,
-        )
-        logger.info(
-            "MMR: %d candidates across %d unique docs.",
-            len(mmr_candidates),
-            len({c["document_id"] for c in mmr_candidates}),
-        )
-    except Exception as exc:
-        logger.warning("MMR failed (%s) — using RRF order.", exc)
+    if len(active_models) == 1 and query_embeddings.get(active_models[0]):
+        try:
+            from services.mmr_service import apply_mmr
+            mmr_candidates = apply_mmr(
+                query_embedding=query_embeddings[active_models[0]],
+                chunks=rrf_candidates,
+                top_k=mmr_pool,
+                lambda_val=mmr_lambda,
+            )
+            logger.info(
+                "MMR: %d candidates across %d unique docs.",
+                len(mmr_candidates),
+                len({c["document_id"] for c in mmr_candidates}),
+            )
+        except Exception as exc:
+            logger.warning("MMR failed (%s) — using RRF order.", exc)
+            mmr_candidates = rrf_candidates[:mmr_pool]
+    else:
+        logger.info("MMR skipped (multi-model or missing query vector) — using RRF order.")
         mmr_candidates = rrf_candidates[:mmr_pool]
-        for c in mmr_candidates:
-            c["mmr_score"] = c.get("rrf_score", 0.0)
+        
+    for c in mmr_candidates:
+        c["mmr_score"] = c.get("rrf_score", 0.0)
 
     # ------------------------------------------------------------------
     # Step 6 — Cross-encoder reranker

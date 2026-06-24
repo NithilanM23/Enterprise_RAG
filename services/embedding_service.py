@@ -68,7 +68,7 @@ def _get_ollama_client(model: str = None):
 # Public API
 # ---------------------------------------------------------------------------
 
-def embed_text(text: str) -> list:
+def embed_text(text: str, model: str = None) -> list:
     """
     Generate an embedding vector for a single text string.
 
@@ -77,10 +77,10 @@ def embed_text(text: str) -> list:
 
     Args:
         text: The text to embed. Should be non-empty.
+        model: Optional model override. Defaults to the current active setting.
 
     Returns:
         A list of floats representing the embedding vector.
-        Length matches the live 'embedding_dimension' setting.
 
     Raises:
         ValueError : If text is empty.
@@ -89,8 +89,9 @@ def embed_text(text: str) -> list:
     if not text or not text.strip():
         raise ValueError("Cannot embed empty text.")
 
-    from services.settings_service import get_setting
-    model = get_setting("embedding_model")
+    if model is None:
+        from services.settings_service import get_setting
+        model = get_setting("embedding_model")
 
     logger.debug("Embedding single text (%d characters) with model '%s'.", len(text), model)
 
@@ -136,6 +137,7 @@ def embed_chunks(chunks: list, batch_size: int = 10) -> list:
 
     from services.settings_service import get_setting
     model = get_setting("embedding_model")
+    dimension = get_setting("embedding_dimension")
 
     total = len(chunks)
     logger.info("Generating embeddings for %d chunks using model '%s'.", total, model)
@@ -154,6 +156,8 @@ def embed_chunks(chunks: list, batch_size: int = 10) -> list:
 
             for chunk, vector in zip(batch, vectors):
                 chunk["embedding"] = vector
+                chunk["embedding_model"] = model
+                chunk["embedding_dimension"] = dimension
 
             embedded_count += len(batch)
             logger.info(

@@ -114,10 +114,10 @@ export default function AdminPage() {
 
   const handleEmbedApply = async () => {
     if (!embedPreview) return;
-    if (!confirm(`This will NULL ${embedPreview.chunks_to_reembed} embeddings. Continue?`)) return;
+    if (!confirm(`Apply new embedding model? (Existing chunks will remain intact and searchable).`)) return;
     try {
       await adminApi.applyEmbedding(newEmbedModel, Number(newEmbedDim));
-      showToast('Embedding model applied. Run "Generate Embeddings" to rebuild.', 'info');
+      showToast('Embedding model applied. New documents will use this model.', 'info');
       setEmbedPreview(null);
       load();
     } catch (e: any) { showToast(e.message, 'error'); }
@@ -257,11 +257,11 @@ export default function AdminPage() {
         </div>
 
         {/* ── Embedding Model ───────────────────────────────── */}
-        <div className="card" style={{ borderColor: embedPreview ? 'var(--warning)' : undefined }}>
+        <div className="card" style={{ borderColor: embedPreview ? 'var(--info)' : undefined }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <h2 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>Embedding Model</h2>
-            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: '#f8514922', color: 'var(--error)', border: '1px solid var(--error)' }}>
-              Destructive
+            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: 'var(--surface-hi2)', color: 'var(--text-sec)', border: '1px solid var(--border)' }}>
+              Non-Destructive
             </span>
           </div>
           <p style={{ fontSize: 12, color: 'var(--text-mute)', marginBottom: 16 }}>
@@ -289,16 +289,16 @@ export default function AdminPage() {
           </div>
 
           {embedPreview && (
-            <div style={{ background: 'var(--surface-hi2)', border: '1px solid var(--warning)', borderRadius: 'var(--r-md)', padding: '14px 16px', marginBottom: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'var(--warning)', fontWeight: 600, fontSize: 13 }}>
-                <AlertTriangle size={14} /> Warning — Destructive Operation
+            <div style={{ background: 'var(--surface-hi2)', border: '1px solid var(--info)', borderRadius: 'var(--r-md)', padding: '14px 16px', marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'var(--info)', fontWeight: 600, fontSize: 13 }}>
+                <CheckCircle size={14} /> Multi-Model Support
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-sec)', lineHeight: 1.7 }}>
                 {embedPreview.warning}
               </div>
               <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-                <button className="btn btn-danger btn-sm" onClick={handleEmbedApply}>
-                  Apply — Null {embedPreview.chunks_to_reembed} embeddings
+                <button className="btn btn-primary btn-sm" onClick={handleEmbedApply}>
+                  Apply New Model
                 </button>
                 <button className="btn btn-ghost btn-sm" onClick={() => setEmbedPreview(null)}>Cancel</button>
               </div>
@@ -306,8 +306,7 @@ export default function AdminPage() {
           )}
 
           <p style={{ fontSize: 11, color: 'var(--text-mute)' }}>
-            Changing the embedding model nulls all existing embeddings (incompatible vector spaces).
-            You must re-run Generate Embeddings after applying.
+            Changing the embedding model tells the system to use the new model for future documents. Old embeddings are kept and seamlessly queried alongside new ones.
           </p>
         </div>
 

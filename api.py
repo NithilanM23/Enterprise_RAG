@@ -525,13 +525,13 @@ async def document_status(doc_id: int, user: dict = Depends(get_current_user)):
 @app.delete("/api/documents/{doc_id}", tags=["Documents"])
 async def delete_document(doc_id: int, user: dict = Depends(get_current_user)):
     def _delete():
-        from services.database_service import delete_document, get_document_by_id
+        from services.database_service import delete_document, get_document
         from config import UPLOAD_DIR
-        doc = get_document_by_id(doc_id, user["id"])
+        doc = get_document(user["id"], doc_id)
         if not doc:
             return None
         filepath = doc.get("filepath")
-        ok = delete_document(doc_id, user["id"])
+        ok = delete_document(user["id"], doc_id)
         if ok and filepath:
             Path(filepath).unlink(missing_ok=True)
         return ok
@@ -592,8 +592,8 @@ def _embed_background(user_id: int):
         with conn.cursor() as cur:
             for c in chunks:
                 cur.execute(
-                    "UPDATE embeddings SET embedding=%s WHERE id=%s;",
-                    (c["embedding"], c["id"])
+                    "UPDATE embeddings SET embedding=%s, embedding_model=%s WHERE id=%s;",
+                    (c["embedding"], c.get("embedding_model"), c["id"])
                 )
 
     try:

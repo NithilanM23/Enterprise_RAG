@@ -102,16 +102,18 @@ def get_setting(key: str, user_id: int = None):
         raise KeyError(f"Unknown setting: '{key}'")
 
     default_value, cast_fn = _DEFAULTS[key]
+    
+    if user_id is None:
+        user_id = 1
 
     from services.database_service import _get_raw_connection
     try:
-        if user_id is not None:
-            with _get_raw_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT value FROM app_settings WHERE key = %s AND user_id = %s;", (key, user_id))
-                    row = cur.fetchone()
-            if row is not None:
-                return cast_fn(row[0])
+        with _get_raw_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM app_settings WHERE key = %s AND user_id = %s;", (key, user_id))
+                row = cur.fetchone()
+        if row is not None:
+            return cast_fn(row[0])
     except Exception as exc:
         logger.warning("Settings lookup failed for '%s', using default: %s", key, exc)
 
@@ -228,64 +230,29 @@ def preview_embedding_model_change(new_model: str, new_dimension: int) -> dict:
         "chunks_to_reembed":   embedded_count,
         "excel_rows_unaffected": excel_row_count,
         "warning": (
-            f"This will erase {embedded_count} existing embedding(s). "
-            f"They were generated with '{current_model}' and are not "
-            f"compatible with '{new_model}'. You must re-run "
-            f"'Generate Embeddings' afterward — this does NOT happen "
-            f"automatically. Excel row data is unaffected (it doesn't use embeddings)."
+            f"This will change the default embedding model for all NEW documents. "
+            f"Your existing {embedded_count} chunks will remain searchable using '{current_model}'. "
+            f"During search, the system will seamlessly query both models and merge the results."
         ),
     }
 
 
 def update_embedding_model(new_model: str, new_dimension: int, confirm: bool = False) -> dict:
     """
-    Apply an embedding model swap. Requires confirm=True — this is a
-    destructive operation for existing search quality (not data loss,
-    but every chunk becomes unsearchable via semantic search until
-    re-embedded).
-
-    Steps:
-      1. Null out every existing embedding (they're from a different
-         vector space and would silently corrupt similarity search if left)
-      2. If the dimension changed, ALTER the pgvector column type and
-         drop the now-incompatible HNSW index (rebuilt automatically on
-         next bulk insert by _ensure_hnsw_index)
-      3. Persist the new model + dimension as settings
-      4. BM25 is untouched — it's text-based, not vector-based
-
-    Returns a summary the admin UI can show as a completion message.
+    Apply an embedding model swap.
+    This now preserves old embeddings and merely updates the settings so that
+    new documents will be ingested using the new model.
     """
     if not confirm:
         raise ValueError(
-            "This is a destructive operation. Call preview_embedding_model_change() "
-            "first and pass confirm=True only after the admin has seen the warning."
+            "Call preview_embedding_model_change() first and pass confirm=True "
+            "after the admin has seen the warning."
         )
-
-    from services.database_service import _get_raw_connection
 
     current_dimension = get_setting("embedding_dimension")
     dimension_changing = new_dimension != current_dimension
 
-    with _get_raw_connection() as conn:
-        with conn.cursor() as cur:
-            # Step 1 — null existing embeddings (incompatible vector space)
-            cur.execute("UPDATE embeddings SET embedding = NULL;")
-            nulled = cur.rowcount
-
-            # Step 2 — migrate column dimension if needed
-            if dimension_changing:
-                cur.execute("DROP INDEX IF EXISTS embeddings_hnsw_idx;")
-                cur.execute(
-                    f"ALTER TABLE embeddings ALTER COLUMN embedding TYPE vector({new_dimension});"
-                )
-                logger.warning(
-                    "pgvector column migrated: vector(%d) → vector(%d). "
-                    "HNSW index dropped — will rebuild on next embedding generation.",
-                    current_dimension, new_dimension,
-                )
-
-    # Step 3 — persist new settings (bypass set_setting's UNSAFE_KEYS guard
-    # since we ARE the safe migration path it's guarding for)
+    # Step 3 — persist new settings (bypass set_setting's UNSAFE_KEYS guard)
     from services.database_service import _get_raw_connection as _raw
     with _raw() as conn:
         with conn.cursor() as cur:
@@ -297,8 +264,8 @@ def update_embedding_model(new_model: str, new_dimension: int, confirm: bool = F
                 """, (1, key, str(value)))  # Hardcode user_id=1 for structural swaps for now
 
     logger.info(
-        "Embedding model migrated: model='%s' dimension=%d. %d embeddings nulled, "
-        "must be regenerated.", new_model, new_dimension, nulled,
+        "Embedding model changed: model='%s' dimension=%d. Old embeddings retained.", 
+        new_model, new_dimension
     )
 
     return {
@@ -306,8 +273,8 @@ def update_embedding_model(new_model: str, new_dimension: int, confirm: bool = F
         "new_model":          new_model,
         "new_dimension":      new_dimension,
         "dimension_changed":  dimension_changing,
-        "embeddings_nulled":  nulled,
-        "next_step":          "Run POST /api/documents/embed to regenerate all embeddings.",
+        "embeddings_nulled":  0,
+        "next_step":          "New documents will now use the new embedding model.",
     }
 
 
