@@ -969,7 +969,7 @@ async def unpin_message(message_id: int):
 
 
 @app.get("/api/saved", tags=["Saved"])
-async def list_saved_answers():
+async def list_saved_answers(user: dict = Depends(get_current_user)):
     """
     Personal saved-answers library. Shown in the sidebar 'Saved' section.
     Each entry includes the original question context (session) and
@@ -978,7 +978,7 @@ async def list_saved_answers():
     """
     def _list():
         from services.pin_service import get_pinned_answers
-        rows = get_pinned_answers()
+        rows = get_pinned_answers(user["id"])
         for r in rows:
             for k in ("pinned_at", "message_created_at"):
                 if hasattr(r.get(k), "isoformat"):

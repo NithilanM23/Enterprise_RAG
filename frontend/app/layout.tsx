@@ -97,23 +97,27 @@ function AppLayout({ children }: { children: React.ReactNode }) {
     return (
       <>
         <div className="sidebar-time-group">{label}</div>
-        {items.map(s => (
-          <div
-            key={s.id}
-            className={`session-item ${pathname === `/chat/${s.id}` ? 'active' : ''}`}
-            onClick={() => router.push(`/chat/${s.id}`)}
-          >
-            <MessagesSquare size={13} style={{ flexShrink: 0, opacity: 0.5 }} />
-            <span className="session-title">{s.title}</span>
-            <button
-              className="session-delete"
-              onClick={e => deleteSession(e, s.id)}
-              title="Delete session"
+        {items.map(s => {
+          const isActive = pathname === `/chat/${s.id}`;
+          return (
+            <div
+              key={s.id}
+              className={`session-item ${isActive ? 'active' : ''}`}
+              onClick={() => router.push(`/chat/${s.id}`)}
             >
-              <Trash2 size={11} />
-            </button>
-          </div>
-        ))}
+              <MessagesSquare size={14} style={{ flexShrink: 0, opacity: 0.5 }} />
+              <span className="session-title">{s.title}</span>
+              <button
+                className="session-delete"
+                onClick={e => deleteSession(e, s.id)}
+                title="Delete session"
+              >
+                <Trash2 size={13} />
+              </button>
+              {isActive && <div className="session-indicator" />}
+            </div>
+          );
+        })}
       </>
     );
   };
@@ -123,21 +127,15 @@ function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
-          <div className="sidebar-logo">
-            <div className="sidebar-logo-icon">🧠</div>
-            <div>
-              <div className="sidebar-logo-text">Knowledge Assistant</div>
-              <div className="sidebar-logo-sub">DICV · Local · Private</div>
-            </div>
-          </div>
+          <div className="sidebar-logo-text">CHAT A.I+</div>
+        </div>
 
-          <button
-            className="sidebar-search"
-            onClick={() => setPalette(true)}
-          >
-            <Search size={13} />
-            <span>Search sessions...</span>
-            <kbd>Ctrl K</kbd>
+        <div className="sidebar-action-row">
+          <button className="new-chat-btn" onClick={newChat}>
+            <Plus size={14} /> New chat
+          </button>
+          <button className="sidebar-search-btn" onClick={() => setPalette(true)} title="Search sessions (Ctrl+K)">
+            <Search size={14} />
           </button>
         </div>
 
@@ -155,12 +153,12 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
 
+        <div className="sidebar-section-header">
+          <div className="sidebar-section-label">Your conversations</div>
+        </div>
+
         {/* Sessions */}
         <div className="sidebar-sessions">
-          <button className="new-chat-btn" onClick={newChat}>
-            <Plus size={14} /> New Chat
-          </button>
-
           {sessions.length === 0 && (
             <div style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-mute)', fontSize: 12 }}>
               No conversations yet
@@ -172,13 +170,18 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <SessionGroup label="Older"     items={older} />
         </div>
         
-        {/* User Footer */}
-        <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: '13px', color: 'var(--text-mute)' }}>
-            User: <strong>{username}</strong>
-          </div>
-          <button onClick={() => signOut()} style={{ background: 'none', border: 'none', color: 'var(--text-mute)', cursor: 'pointer', fontSize: '13px' }}>
-            Logout
+        {/* Footer */}
+        <div className="sidebar-footer">
+          {username === 'admin' && (
+            <button className="footer-pill" onClick={() => router.push('/admin')}>
+              <Settings size={15} /> Settings
+            </button>
+          )}
+          <button className="footer-pill" onClick={() => signOut()} title="Logout">
+            <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--text-sec)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>
+              {username ? username[0].toUpperCase() : 'U'}
+            </div>
+            {username}
           </button>
         </div>
       </aside>

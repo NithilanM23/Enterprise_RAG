@@ -73,7 +73,7 @@ def _get_reranker(model: str = None):
         logger.info(
             "Loading reranker model '%s' (first load may download ~80MB)...", model
         )
-        _reranker = CrossEncoder(model, max_length=512)
+        _reranker = CrossEncoder(model, max_length=512, device="cpu")
         _reranker_model_loaded = model
         logger.info("Reranker model loaded: '%s'.", model)
 

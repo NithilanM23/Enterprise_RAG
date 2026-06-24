@@ -13,6 +13,7 @@ interface Source {
 interface Props {
   sources: Source[];
   activeIndex: number | null;
+  open: boolean;
   onClose: () => void;
 }
 
@@ -22,9 +23,7 @@ function scoreLabel(score: number): { label: string; cls: string } {
   return              { label: score.toFixed(2),               cls: 'low' };
 }
 
-export default function SourcePanel({ sources, activeIndex, onClose }: Props) {
-  const open = sources.length > 0;
-
+export default function SourcePanel({ sources, activeIndex, open, onClose }: Props) {
   // Scroll active source into view
   const scrollToActive = (node: HTMLDivElement | null) => {
     if (node && activeIndex !== null) {

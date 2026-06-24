@@ -18,6 +18,7 @@ interface MessageUI {
   streaming?: boolean;
   followups?: string[];
   routing?: { category: string; confidence: number };
+  loadingStatus?: string;
 }
 
 export default function ChatPage() {
@@ -38,6 +39,8 @@ export default function ChatPage() {
   const [allDocs,     setAllDocs]    = useState<any[]>([]);
   const [selectedDocIds, setSelectedDocIds] = useState<number[] | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [autoSent, setAutoSent] = useState(false);
 
   const bottomRef  = useRef<HTMLDivElement>(null);
   const inputRef   = useRef<HTMLTextAreaElement>(null);
@@ -47,30 +50,33 @@ export default function ChatPage() {
     try {
       documentsApi.list().then(setAllDocs).catch(() => {});
     } catch {}
-    if (!sessionId) return;
+    if (!sessionId) {
+      setHistoryLoaded(true);
+      return;
+    }
     try {
       const [sess, msgs] = await Promise.all([
         sessionsApi.list().then(list => list.find(s => s.id === sessionId)),
         sessionsApi.messages(sessionId),
       ]);
       if (sess) setTitle(sess.title);
-      setMessages(msgs.map((m: any) => ({
-        id: m.id, role: m.role, content: m.content,
-        sources: m.sources, is_pinned: m.is_pinned,
-      })));
-    } catch {}
+      setMessages(prev => {
+        if (msgs.length === 0 && prev.length > 0) {
+          return prev;
+        }
+        return msgs.map((m: any) => ({
+          id: m.id, role: m.role, content: m.content,
+          sources: m.sources, is_pinned: m.is_pinned,
+        }));
+      });
+    } catch {} finally {
+      setHistoryLoaded(true);
+    }
   }, [sessionId]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
-  // Auto-send if ?q= param is present
-  useEffect(() => {
-    const q = searchParams.get('q');
-    if (q && messages.length === 0) {
-      setInput(q);
-      setTimeout(() => sendMessage(q), 300);
-    }
-  }, []); // eslint-disable-line
+
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -102,7 +108,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, userMsg]);
 
     // Streaming assistant message placeholder
-    const assistantMsg: MessageUI = { role: 'assistant', content: '', streaming: true };
+    const assistantMsg: MessageUI = { role: 'assistant', content: '', streaming: true, loadingStatus: '✨ Analyzing query...' };
     setMessages(prev => [...prev, assistantMsg]);
 
     let routingInfo: any = null;
@@ -114,27 +120,60 @@ export default function ChatPage() {
       (evt) => {
         if (evt.type === 'routing') {
           routingInfo = { category: evt.category, confidence: evt.confidence };
+          setMessages(prev => {
+            if (prev.length === 0) return prev;
+            const msgs = [...prev];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === 'assistant') {
+              msgs[msgs.length - 1] = { ...last, loadingStatus: `🔍 Searching ${evt.category.replace(/_/g, ' ')}...` };
+            }
+            return msgs;
+          });
         }
         if (evt.type === 'sources') {
           currentSources = evt.chunks;
           setSources(evt.chunks);
-          if (evt.chunks.length > 0) setPanelOpen(true);
+          setMessages(prev => {
+            if (prev.length === 0) return prev;
+            const msgs = [...prev];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === 'assistant') {
+              msgs[msgs.length - 1] = { ...last, loadingStatus: `📚 Reading ${evt.chunks.length} documents...` };
+            }
+            return msgs;
+          });
+          // After a short delay, update to formulating
+          setTimeout(() => {
+            setMessages(prev => {
+              if (prev.length === 0) return prev;
+              const msgs = [...prev];
+              const last = msgs[msgs.length - 1];
+              if (last && last.role === 'assistant' && last.loadingStatus) {
+                msgs[msgs.length - 1] = { ...last, loadingStatus: `💡 Formulating answer...` };
+              }
+              return msgs;
+            });
+          }, 600);
         }
         if (evt.type === 'token') {
           setMessages(prev => {
+            if (prev.length === 0) return prev;
             const msgs = [...prev];
             const last = msgs[msgs.length - 1];
-            if (last.role === 'assistant') {
-              msgs[msgs.length - 1] = { ...last, content: last.content + evt.text };
+            if (last && last.role === 'assistant') {
+              const updated = { ...last, content: last.content + evt.text };
+              delete updated.loadingStatus; // Clear loading status once text starts
+              msgs[msgs.length - 1] = updated;
             }
             return msgs;
           });
         }
         if (evt.type === 'done') {
           setMessages(prev => {
+            if (prev.length === 0) return prev;
             const msgs = [...prev];
             const last = msgs[msgs.length - 1];
-            if (last.role === 'assistant') {
+            if (last && last.role === 'assistant') {
               msgs[msgs.length - 1] = {
                 ...last,
                 streaming: false,
@@ -189,6 +228,19 @@ export default function ChatPage() {
 
     setStreamCtrl(ctrl);
   }, [input, sending, sessionId, title, selectedDocIds]);
+
+  // Auto-send if ?q= param is present
+  useEffect(() => {
+    if (historyLoaded && !autoSent) {
+      const q = searchParams.get('q');
+      if (q && messages.length === 0) {
+        setAutoSent(true);
+        // Strip q from URL so refresh doesn't trigger it again
+        window.history.replaceState({}, '', `/chat/${sessionId}`);
+        setTimeout(() => sendMessage(q), 50);
+      }
+    }
+  }, [historyLoaded, autoSent, searchParams, messages.length, sendMessage, sessionId]);
 
   const stopStream = () => {
     streamCtrl?.abort();
@@ -262,96 +314,93 @@ export default function ChatPage() {
 
   return (
     <>
-      {/* Topbar */}
-      <div className="topbar">
-        <MessageSquare size={15} style={{ color: 'var(--primary)' }} />
-        <span className="topbar-title">{title}</span>
-        {sources.length > 0 && (
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => setPanelOpen(p => !p)}
-            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-          >
-            <Layers size={13} />
-            {sources.length} source{sources.length !== 1 ? 's' : ''}
-          </button>
-        )}
-      </div>
-
       {/* Chat layout */}
       <div className="chat-layout">
         <div className="chat-main">
           {/* Messages */}
           <div className="chat-messages">
             {messages.length === 0 && (
-              <div className="empty-state" style={{ marginTop: '15vh' }}>
-                <div className="empty-icon"><MessageSquare size={40} /></div>
-                <div className="empty-title">Start a conversation</div>
-                <div className="empty-sub">Ask anything about your uploaded documents. Answers come from your documents only.</div>
+              <div className="empty-state-modern">
+                <div className="empty-title">Hello, how can I help?</div>
               </div>
             )}
 
             {messages.map((msg, i) => (
               <div key={i} className={`msg-row ${msg.role}`}>
-                <div className="msg-label">
-                  {msg.role === 'user' ? 'You' : '🧠 Assistant'}
+                <div className={`msg-avatar ${msg.role}`}>
+                  {msg.role === 'user' ? 'U' : '🧠'}
                 </div>
 
-                {/* Routing badge for assistant */}
-                {msg.role === 'assistant' && msg.routing?.category && (
-                  <div className="routing-badge">
-                    <div className="routing-dot" />
-                    Searched: {msg.routing.category.replace(/_/g, ' ')}
-                    {msg.routing.confidence >= 2 ? ' (focused)' : ' (broad)'}
-                  </div>
-                )}
+                <div className="msg-content-wrapper">
+                  {/* Routing badge for assistant */}
+                  {msg.role === 'assistant' && msg.routing?.category && (
+                    <div className="routing-badge">
+                      <div className="routing-dot" />
+                      Searched: {msg.routing.category.replace(/_/g, ' ')}
+                      {msg.routing.confidence >= 2 ? ' (focused)' : ' (broad)'}
+                    </div>
+                  )}
 
-                <div className={`msg-bubble ${msg.role}`}>
-                  {renderContent(msg.content, msg.sources)}
-                  {msg.streaming && <span className="stream-cursor" />}
+                  <div className={`msg-bubble ${msg.role}`}>
+                    {msg.loadingStatus ? (
+                      <div className="thinking-loader">
+                        <div className="thinking-dots">
+                          <span className="dot"></span>
+                          <span className="dot"></span>
+                          <span className="dot"></span>
+                        </div>
+                        <span className="thinking-text">{msg.loadingStatus}</span>
+                      </div>
+                    ) : (
+                      <>
+                        {renderContent(msg.content, msg.sources)}
+                        {msg.streaming && <span className="stream-cursor" />}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Message actions (assistant only) */}
+                  {msg.role === 'assistant' && !msg.streaming && (
+                    <div className="msg-actions">
+                      {msg.sources && msg.sources.length > 0 && (
+                        <button
+                          className="msg-action-btn"
+                          onClick={() => { setSources(msg.sources!); setPanelOpen(true); setActiveSource(null); }}
+                        >
+                          <Layers size={11} /> {msg.sources.length} source{msg.sources.length !== 1 ? 's' : ''}
+                        </button>
+                      )}
+                      <button className="msg-action-btn" onClick={() => handleCopy(msg.content)}>
+                        <Copy size={11} /> Copy
+                      </button>
+                      {msg.id && (
+                        <button
+                          className={`msg-action-btn ${msg.is_pinned ? 'pinned' : ''}`}
+                          onClick={() => handlePin(msg)}
+                          title={msg.is_pinned ? 'Unpin' : 'Pin to Saved'}
+                        >
+                          {msg.is_pinned ? <BookmarkCheck size={11} /> : <Bookmark size={11} />}
+                          {msg.is_pinned ? 'Saved' : 'Save'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Follow-up chips */}
+                  {msg.role === 'assistant' && !msg.streaming && msg.followups && msg.followups.length > 0 && (
+                    <div className="followup-row">
+                      {msg.followups.map((q, fi) => (
+                        <button
+                          key={fi}
+                          className="followup-chip"
+                          onClick={() => { setInput(q); setTimeout(() => sendMessage(q), 50); }}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-
-                {/* Message actions (assistant only) */}
-                {msg.role === 'assistant' && !msg.streaming && (
-                  <div className="msg-actions">
-                    {msg.sources && msg.sources.length > 0 && (
-                      <button
-                        className="msg-action-btn"
-                        onClick={() => { setSources(msg.sources!); setPanelOpen(true); setActiveSource(null); }}
-                      >
-                        <Layers size={11} /> {msg.sources.length} source{msg.sources.length !== 1 ? 's' : ''}
-                      </button>
-                    )}
-                    <button className="msg-action-btn" onClick={() => handleCopy(msg.content)}>
-                      <Copy size={11} /> Copy
-                    </button>
-                    {msg.id && (
-                      <button
-                        className={`msg-action-btn ${msg.is_pinned ? 'pinned' : ''}`}
-                        onClick={() => handlePin(msg)}
-                        title={msg.is_pinned ? 'Unpin' : 'Pin to Saved'}
-                      >
-                        {msg.is_pinned ? <BookmarkCheck size={11} /> : <Bookmark size={11} />}
-                        {msg.is_pinned ? 'Saved' : 'Save'}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Follow-up chips */}
-                {msg.role === 'assistant' && !msg.streaming && msg.followups && msg.followups.length > 0 && (
-                  <div className="followup-row">
-                    {msg.followups.map((q, fi) => (
-                      <button
-                        key={fi}
-                        className="followup-chip"
-                        onClick={() => { setInput(q); setTimeout(() => sendMessage(q), 50); }}
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                )}
               </div>
             ))}
 
@@ -360,51 +409,6 @@ export default function ChatPage() {
 
           {/* Input area */}
           <div className="chat-input-area">
-            {/* Document Scope Selector */}
-            <div className="scope-selector" style={{ marginBottom: 10, padding: '0 15%' }}>
-              <div 
-                onClick={() => setScopeExpanded(!scopeExpanded)}
-                style={{ cursor: 'pointer', fontSize: 13, color: '#8b949e', display: 'inline-flex', alignItems: 'center', gap: 4, background: '#161b22', padding: '4px 10px', borderRadius: 12, border: '1px solid #30363d' }}
-              >
-                <Layers size={13} />
-                {selectedDocIds ? `Searching ${selectedDocIds.length} document${selectedDocIds.length !== 1 ? 's' : ''}` : 'Searching all documents'}
-                <ChevronDown size={13} style={{ transform: scopeExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
-              </div>
-              
-              {scopeExpanded && (
-                <div style={{ marginTop: 6, background: '#0d1117', border: '1px solid #30363d', borderRadius: 6, padding: '8px 12px', maxHeight: 150, overflowY: 'auto' }}>
-                  <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 6 }}>
-                    <input 
-                      type="checkbox" 
-                      checked={selectedDocIds === null} 
-                      onChange={() => setSelectedDocIds(null)} 
-                    />
-                    All documents
-                  </label>
-                  {allDocs.map(doc => (
-                    <label key={doc.id} style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 4 }}>
-                      <input 
-                        type="checkbox" 
-                        checked={selectedDocIds !== null && selectedDocIds.includes(doc.id)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedDocIds(prev => prev === null ? [doc.id] : [...prev, doc.id]);
-                          } else {
-                            setSelectedDocIds(prev => {
-                              if (prev === null) return null;
-                              const next = prev.filter(id => id !== doc.id);
-                              return next.length === 0 ? null : next;
-                            });
-                          }
-                        }}
-                      />
-                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{doc.filename}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-
             <div className="chat-input-wrap">
               <textarea
                 ref={inputRef}
@@ -416,22 +420,71 @@ export default function ChatPage() {
                 onKeyDown={handleKeyDown}
                 disabled={sending}
               />
-              {sending ? (
-                <button className="chat-send-btn" onClick={stopStream} title="Stop generating" style={{ background: 'var(--error)' }}>
-                  <StopCircle size={16} />
-                </button>
-              ) : (
-                <button
-                  className="chat-send-btn"
-                  onClick={() => sendMessage()}
-                  disabled={!input.trim()}
-                  title="Send (Enter)"
-                >
-                  <Send size={16} />
-                </button>
-              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ position: 'relative' }}>
+                  <button 
+                    className={`chat-scope-btn ${selectedDocIds !== null ? 'active' : ''}`}
+                    onClick={() => setScopeExpanded(!scopeExpanded)}
+                    title={selectedDocIds ? `Searching ${selectedDocIds.length} docs` : 'Searching all docs'}
+                  >
+                    <Layers size={18} />
+                    {selectedDocIds && <div className="chat-scope-dot" />}
+                  </button>
+                  
+                  {scopeExpanded && (
+                    <div className="chat-scope-dropdown">
+                      <div className="chat-scope-dropdown-header">Document Scope</div>
+                      <div className="chat-scope-dropdown-list">
+                        <label className="chat-scope-option">
+                          <input 
+                            type="checkbox" 
+                            checked={selectedDocIds === null} 
+                            onChange={() => setSelectedDocIds(null)} 
+                          />
+                          <span>All documents</span>
+                        </label>
+                        {allDocs.map(doc => (
+                          <label key={doc.id} className="chat-scope-option">
+                            <input 
+                              type="checkbox" 
+                              checked={selectedDocIds !== null && selectedDocIds.includes(doc.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedDocIds(prev => prev === null ? [doc.id] : [...prev, doc.id]);
+                                } else {
+                                  setSelectedDocIds(prev => {
+                                    if (prev === null) return null;
+                                    const next = prev.filter(id => id !== doc.id);
+                                    return next.length === 0 ? null : next;
+                                  });
+                                }
+                              }}
+                            />
+                            <span className="chat-scope-filename">{doc.filename}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {sending ? (
+                  <button className="chat-send-btn" onClick={stopStream} title="Stop generating" style={{ background: 'var(--error)' }}>
+                    <StopCircle size={16} />
+                  </button>
+                ) : (
+                  <button
+                    className="chat-send-btn"
+                    onClick={() => sendMessage()}
+                    disabled={!input.trim()}
+                    title="Send (Enter)"
+                  >
+                    <Send size={16} />
+                  </button>
+                )}
+              </div>
             </div>
-            <div className="chat-hint" style={{ marginTop: 6 }}>
+            <div className="chat-hint" style={{ marginTop: 8 }}>
               Answers sourced exclusively from your uploaded documents.
             </div>
           </div>
@@ -441,6 +494,7 @@ export default function ChatPage() {
         <SourcePanel
           sources={sources}
           activeIndex={activeSource}
+          open={panelOpen}
           onClose={() => setPanelOpen(false)}
         />
       </div>

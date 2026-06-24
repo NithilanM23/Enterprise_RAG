@@ -144,7 +144,9 @@ def retrieve(
         routing_info = classify_query(query)
 
         if routing_info["routed"]:
-            scoped_ids = get_document_ids_for_category(routing_info["category"])
+            scoped_ids = get_document_ids_for_category(routing_info["category"]) or []
+            # SECURITY: Ensure we only route to documents owned by the current user
+            scoped_ids = [did for did in scoped_ids if did in user_docs]
 
             if scoped_ids:
                 confidence = routing_info["confidence"]
@@ -158,19 +160,20 @@ def retrieve(
                     )
                 else:
                     # Low confidence → soft scope: prefer category but don't exclude others.
-                    document_ids = None
+                    document_ids = user_docs
                     routing_info["routed"] = False
                     routing_info["soft_scope"] = scoped_ids
                     logger.info(
-                        "Soft routing: category='%s' confidence=%.1f → global search.",
+                        "Soft routing: category='%s' confidence=%.1f → global user search.",
                         routing_info["category"], confidence,
                     )
             else:
-                document_ids = None
+                document_ids = user_docs
                 routing_info["routed"] = False
         else:
+            document_ids = user_docs
             logger.info(
-                "Routing confidence %.1f below threshold — global search.",
+                "Routing confidence %.1f below threshold — global user search.",
                 routing_info["confidence"],
             )
 
