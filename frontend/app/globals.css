@@ -105,6 +105,7 @@ input::placeholder, textarea::placeholder { color: var(--text-mute); }
 }
 
 .main-content {
+  position: relative;
   flex: 1;
   overflow: hidden;
   display: flex;
@@ -126,6 +127,37 @@ input::placeholder, textarea::placeholder { color: var(--text-mute); }
   flex-direction: column;
   overflow: hidden;
   z-index: 10;
+  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease;
+}
+
+.sidebar.collapsed {
+  margin-left: calc((var(--sidebar-w) + 16px) * -1);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-toggle-btn {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 50;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--text-sec);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+
+.sidebar-toggle-btn:hover {
+  background: var(--surface-hov);
+  color: var(--primary);
+  transform: scale(1.05);
 }
 
 .sidebar-header {

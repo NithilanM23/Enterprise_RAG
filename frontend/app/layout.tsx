@@ -7,7 +7,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   MessageSquare, FileText, BarChart2, Bookmark,
   Settings, Plus, Search, Trash2, Brain, X,
-  MessagesSquare, ChevronRight,
+  MessagesSquare, ChevronRight, PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 import { sessions as sessionsApi } from '@/utils/api';
 import CommandPalette from '@/components/CommandPalette';
@@ -20,6 +20,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   const router    = useRouter();
   const [sessions, setSessions]   = useState<any[]>([]);
   const [palette,  setPalette]    = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const { data: session, status } = useSession();
   const username = session?.user?.name || '';
 
@@ -125,7 +126,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell">
       {/* Sidebar */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
         <div className="sidebar-header">
           <div className="sidebar-logo-text">CHAT A.I+</div>
         </div>
@@ -188,6 +189,13 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
       {/* Main content */}
       <div className="main-content">
+        <button 
+          className="sidebar-toggle-btn"
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+        >
+          {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+        </button>
         {children}
       </div>
 
