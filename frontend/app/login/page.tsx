@@ -45,10 +45,10 @@ export default function LoginPage() {
   };
 
   return (
-    <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--bg)', color: 'var(--text)' }}>
-      <div style={{ background: 'var(--bg-elevated)', padding: '40px', borderRadius: '12px', width: '100%', maxWidth: '400px', boxShadow: '0 8px 24px rgba(0,0,0,0.1)' }}>
+    <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #eef2f6 0%, var(--primary-dim) 100%)', color: 'var(--text)' }}>
+      <div style={{ background: 'var(--surface-hi)', padding: '40px', borderRadius: '16px', width: '100%', maxWidth: '400px', boxShadow: '0 10px 40px rgba(0,0,0,0.08)' }}>
         <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '48px', height: '48px', borderRadius: '50%', backgroundColor: 'var(--accent)', color: 'white', marginBottom: '16px' }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '48px', height: '48px', borderRadius: '50%', backgroundColor: 'var(--primary)', color: 'white', marginBottom: '16px' }}>
             <Brain size={24} />
           </div>
           <h1 style={{ fontSize: '24px', fontWeight: 600, margin: 0 }}>DICV Knowledge Assistant</h1>
@@ -98,7 +98,9 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            style={{ width: '100%', padding: '12px', borderRadius: '8px', background: 'var(--accent)', color: 'white', border: 'none', fontWeight: 500, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1, transition: 'opacity 0.2s' }}
+            style={{ width: '100%', padding: '12px', borderRadius: '8px', background: 'var(--primary)', color: 'white', border: 'none', fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1, transition: 'all 0.2s', boxShadow: '0 4px 12px rgba(37, 99, 235, 0.2)' }}
+            onMouseOver={(e) => { if (!loading) e.currentTarget.style.background = 'var(--primary-hi)' }}
+            onMouseOut={(e) => { if (!loading) e.currentTarget.style.background = 'var(--primary)' }}
           >
             {loading ? 'Processing...' : isRegistering ? 'Register' : 'Sign In'}
           </button>
@@ -109,7 +111,7 @@ export default function LoginPage() {
           <button
             type="button"
             onClick={() => { setIsRegistering(!isRegistering); setError(''); setPassword(''); }}
-            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontWeight: 500 }}
+            style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: 0, fontWeight: 600 }}
           >
             {isRegistering ? 'Sign In' : 'Register'}
           </button>

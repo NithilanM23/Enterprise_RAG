@@ -7,7 +7,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   MessageSquare, FileText, BarChart2, Bookmark,
   Settings, Plus, Search, Trash2, Brain, X,
-  MessagesSquare, ChevronRight, PanelLeftClose, PanelLeftOpen
+  MessagesSquare, ChevronRight, PanelLeftClose, PanelLeftOpen, LogOut
 } from 'lucide-react';
 import { sessions as sessionsApi } from '@/utils/api';
 import CommandPalette from '@/components/CommandPalette';
@@ -178,12 +178,25 @@ function AppLayout({ children }: { children: React.ReactNode }) {
               <Settings size={15} /> Settings
             </button>
           )}
-          <button className="footer-pill" onClick={() => signOut()} title="Logout">
-            <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--text-sec)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>
-              {username ? username[0].toUpperCase() : 'U'}
+          <div className="footer-pill" style={{ cursor: 'default', display: 'flex', justifyContent: 'space-between', paddingRight: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'var(--text-sec)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>
+                {username ? username[0].toUpperCase() : 'U'}
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100px' }}>
+                {username || 'User'}
+              </span>
             </div>
-            {username}
-          </button>
+            <button 
+              onClick={() => signOut()} 
+              title="Logout"
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '6px', borderRadius: '50%', color: 'var(--text-sec)', background: 'var(--surface-hi2)', border: '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.15s ease' }}
+              onMouseOver={(e) => { e.currentTarget.style.color = 'var(--error)'; e.currentTarget.style.borderColor = '#fca5a5'; }}
+              onMouseOut={(e) => { e.currentTarget.style.color = 'var(--text-sec)'; e.currentTarget.style.borderColor = 'var(--border)'; }}
+            >
+              <LogOut size={13} />
+            </button>
+          </div>
         </div>
       </aside>
 

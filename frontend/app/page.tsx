@@ -48,11 +48,11 @@ export default function Dashboard() {
     return 'Good evening';
   };
 
-  const StatusDot = ({ ok }: { ok: boolean }) => (
+  const StatusDot = ({ ok, color = 'var(--success)' }: { ok: boolean, color?: string }) => (
     <div style={{
       width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-      background: ok ? 'var(--success)' : 'var(--error)',
-      boxShadow: `0 0 6px ${ok ? 'var(--success)' : 'var(--error)'}`,
+      background: ok ? color : 'var(--error)',
+      boxShadow: `0 0 6px ${ok ? color : 'var(--error)'}`,
     }} />
   );
 
@@ -66,7 +66,7 @@ export default function Dashboard() {
               <StatusDot ok={dbHealth.db?.connected} /> DB
             </div>
             <div className={`status-pill ${dbHealth.ollama?.reachable ? 'ok' : 'error'}`}>
-              <StatusDot ok={dbHealth.ollama?.reachable} /> Ollama
+              <StatusDot ok={dbHealth.ollama?.reachable} color="var(--primary)" /> Ollama
             </div>
           </>
         )}
