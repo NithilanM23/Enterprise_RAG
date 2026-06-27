@@ -66,7 +66,7 @@ export default function Dashboard() {
               <StatusDot ok={dbHealth.db?.connected} /> DB
             </div>
             <div className={`status-pill ${dbHealth.ollama?.reachable ? 'ok' : 'error'}`}>
-              <StatusDot ok={dbHealth.ollama?.reachable} color="var(--primary)" /> Ollama
+              <StatusDot ok={dbHealth.ollama?.reachable} /> Ollama
             </div>
           </>
         )}

@@ -218,9 +218,13 @@ export default function DocumentsPage() {
                 <FileText size={14} style={{ color: 'var(--text-mute)', flexShrink: 0 }} />
                 <span className="truncate" style={{ flex: 1, fontSize: 13 }}>{card.filename}</span>
                 <StageChip stage={card.stage} pct={Math.round(card.percent)} />
-                {card.stage === 'embedding' && (
-                  <div style={{ width: 80, height: 4, background: 'var(--surface-hi2)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', width: `${card.percent}%`, background: 'var(--primary)', transition: 'width .3s' }} />
+                {(card.stage === 'embedding' || card.stage === 'chunking') && (
+                  <div style={{ width: 80, height: 4, background: 'var(--surface-hi2)', borderRadius: 2, overflow: 'hidden', position: 'relative' }}>
+                    {card.stage === 'chunking' ? (
+                      <div style={{ height: '100%', width: '30%', background: 'var(--primary)', borderRadius: 2, animation: 'indeterminate 1.5s infinite ease-in-out' }} />
+                    ) : (
+                      <div style={{ height: '100%', width: `${card.percent}%`, background: 'var(--primary)', transition: 'width .3s' }} />
+                    )}
                   </div>
                 )}
                 {card.error && <span style={{ fontSize: 11, color: 'var(--error)' }}>{card.error}</span>}

@@ -111,7 +111,7 @@ def embed_text(text: str, model: str = None) -> list:
         ) from exc
 
 
-def embed_chunks(chunks: list, batch_size: int = 10) -> list:
+def embed_chunks(chunks: list, batch_size: int = 10, on_batch_embedded=None) -> list:
     """
     Generate embeddings for a list of chunk dicts (in-place update).
 
@@ -164,6 +164,9 @@ def embed_chunks(chunks: list, batch_size: int = 10) -> list:
                 "Embedded %d/%d chunks (batch took %.1fs).",
                 embedded_count, total, elapsed,
             )
+
+            if on_batch_embedded:
+                on_batch_embedded(batch)
 
         except Exception as exc:
             raise RuntimeError(

@@ -586,15 +586,16 @@ def _embed_background(user_id: int):
         return
 
     chunks = [{"id": r["id"], "chunk_text": r["chunk_text"], "embedding": None} for r in rows]
-    embed_chunks(chunks)
+    def save_batch(batch):
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                for c in batch:
+                    cur.execute(
+                        "UPDATE embeddings SET embedding=%s, embedding_model=%s WHERE id=%s;",
+                        (c["embedding"], c.get("embedding_model"), c["id"])
+                    )
 
-    with _get_connection() as conn:
-        with conn.cursor() as cur:
-            for c in chunks:
-                cur.execute(
-                    "UPDATE embeddings SET embedding=%s, embedding_model=%s WHERE id=%s;",
-                    (c["embedding"], c.get("embedding_model"), c["id"])
-                )
+    embed_chunks(chunks, on_batch_embedded=save_batch)
 
     try:
         from services.bm25_service import build_index
