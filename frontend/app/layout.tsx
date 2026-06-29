@@ -16,10 +16,10 @@ import { Providers } from './providers';
 import { useSession, signOut } from 'next-auth/react';
 
 function AppLayout({ children }: { children: React.ReactNode }) {
-  const pathname  = usePathname();
-  const router    = useRouter();
-  const [sessions, setSessions]   = useState<any[]>([]);
-  const [palette,  setPalette]    = useState(false);
+  const pathname = usePathname();
+  const router = useRouter();
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [palette, setPalette] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { data: session, status } = useSession();
   const username = session?.user?.name || '';
@@ -31,11 +31,11 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   }, [status, pathname, router]);
 
   const loadSessions = useCallback(async () => {
-    try { setSessions(await sessionsApi.list()); } catch {}
+    try { setSessions(await sessionsApi.list()); } catch { }
   }, []);
 
-  useEffect(() => { 
-    if (pathname !== '/login') loadSessions(); 
+  useEffect(() => {
+    if (pathname !== '/login') loadSessions();
   }, [loadSessions, pathname]);
 
   // Ctrl+K global shortcut
@@ -56,7 +56,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
       const s = await sessionsApi.create();
       await loadSessions();
       router.push(`/chat/${s.id}`);
-    } catch {}
+    } catch { }
   };
 
   const deleteSession = async (e: React.MouseEvent, id: number) => {
@@ -66,7 +66,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
       await sessionsApi.delete(id);
       setSessions(prev => prev.filter(s => s.id !== id));
       if (pathname === `/chat/${id}`) router.push('/');
-    } catch {}
+    } catch { }
   };
 
   if (pathname === '/login') {
@@ -74,23 +74,23 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   // Group sessions by time
-  const now   = Date.now();
+  const now = Date.now();
   const today = sessions.filter(s => now - new Date(s.updated_at).getTime() < 86400000);
-  const week  = sessions.filter(s => {
+  const week = sessions.filter(s => {
     const age = now - new Date(s.updated_at).getTime();
     return age >= 86400000 && age < 7 * 86400000;
   });
   const older = sessions.filter(s => now - new Date(s.updated_at).getTime() >= 7 * 86400000);
 
   const navItems = [
-    { href: '/',           icon: <Brain size={15} />,         label: 'Dashboard' },
-    { href: '/documents',  icon: <FileText size={15} />,      label: 'Documents' },
-    { href: '/explorer',   icon: <BarChart2 size={15} />,     label: 'Data Explorer' },
-    { href: '/saved',      icon: <Bookmark size={15} />,      label: 'Saved' },
+    { href: '/', icon: <Brain size={15} />, label: 'Dashboard' },
+    { href: '/documents', icon: <FileText size={15} />, label: 'Documents' },
+    { href: '/explorer', icon: <BarChart2 size={15} />, label: 'Data Explorer' },
+    { href: '/saved', icon: <Bookmark size={15} />, label: 'Saved' },
   ];
 
   if (username === 'admin') {
-    navItems.push({ href: '/admin',      icon: <Settings size={15} />,      label: 'Admin' });
+    navItems.push({ href: '/admin', icon: <Settings size={15} />, label: 'Admin' });
   }
 
   const SessionGroup = ({ label, items }: { label: string; items: any[] }) => {
@@ -128,7 +128,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
         <div className="sidebar-header">
-          <div className="sidebar-logo-text">CHAT A.I+</div>
+          <div className="sidebar-logo-text">DICV LOCAL A.I</div>
         </div>
 
         <div className="sidebar-action-row">
@@ -166,11 +166,11 @@ function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           )}
 
-          <SessionGroup label="Today"     items={today} />
+          <SessionGroup label="Today" items={today} />
           <SessionGroup label="This week" items={week} />
-          <SessionGroup label="Older"     items={older} />
+          <SessionGroup label="Older" items={older} />
         </div>
-        
+
         {/* Footer */}
         <div className="sidebar-footer">
           {username === 'admin' && (
@@ -187,8 +187,8 @@ function AppLayout({ children }: { children: React.ReactNode }) {
                 {username || 'User'}
               </span>
             </div>
-            <button 
-              onClick={() => signOut()} 
+            <button
+              onClick={() => signOut()}
               title="Logout"
               style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '6px', borderRadius: '50%', color: 'var(--text-sec)', background: 'var(--surface-hi2)', border: '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.15s ease' }}
               onMouseOver={(e) => { e.currentTarget.style.color = 'var(--error)'; e.currentTarget.style.borderColor = '#fca5a5'; }}
@@ -202,7 +202,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
       {/* Main content */}
       <div className="main-content">
-        <button 
+        <button
           className="sidebar-toggle-btn"
           onClick={() => setSidebarOpen(!sidebarOpen)}
           title={sidebarOpen ? "Close sidebar" : "Open sidebar"}

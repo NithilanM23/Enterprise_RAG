@@ -441,7 +441,7 @@ export default function ChatPage() {
                             checked={selectedDocIds === null} 
                             onChange={() => setSelectedDocIds(null)} 
                           />
-                          <span>All documents</span>
+                          <span className="chat-scope-filename">All documents</span>
                         </label>
                         {allDocs.map(doc => (
                           <label key={doc.id} className="chat-scope-option">
