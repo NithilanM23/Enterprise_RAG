@@ -138,10 +138,12 @@ class AskRequest(BaseModel):
     session_id:   int
     question:     str
     document_ids: Optional[List[int]] = None
+    use_rag:      bool = True
 
 
 class SessionCreate(BaseModel):
     title: Optional[str] = "New Chat"
+    app_mode: Optional[str] = "rag"
 
 
 class SessionRename(BaseModel):
@@ -712,11 +714,11 @@ async def list_sessions(user: dict = Depends(get_current_user)):
     return await run_sync(_list)
 
 
-@app.post("/api/sessions", tags=["Chat"])
+@app.post("/api/sessions", tags=["Sessions"])
 async def create_session(body: SessionCreate, user: dict = Depends(get_current_user)):
     def _create():
         from services.chat_service import create_session
-        s = create_session(user["id"], body.title)
+        s = create_session(user["id"], body.title, body.app_mode)
         for k in ("created_at", "updated_at"):
             if hasattr(s.get(k), "isoformat"):
                 s[k] = s[k].isoformat()
@@ -795,29 +797,32 @@ async def ask(body: AskRequest, user: dict = Depends(get_current_user)):
                 from services.chat_service    import get_history_buffer
                 from services.retrieval_service import retrieve
                 history = get_history_buffer(body.session_id)
+                if not body.use_rag:
+                    return history, []
                 chunks  = retrieve(body.question, user["id"], document_ids=body.document_ids)
                 return history, chunks
 
             history, chunks = await run_sync(_retrieve)
 
             # Send routing info
-            if chunks:
+            if chunks and body.use_rag:
                 routing = chunks[0].get("routing", {})
                 yield f"data: {json.dumps({'type': 'routing', 'category': routing.get('category','general'), 'confidence': routing.get('confidence', 0)})}\n\n"
 
             # Send source chunks to frontend
             sources = []
-            for c in chunks:
-                sources.append({
-                    "filename":       c.get("filename", ""),
-                    "chunk_number":   c.get("chunk_number", 0),
-                    "chunk_text":     c.get("chunk_text", "")[:500],
-                    "reranker_score": round(float(c.get("reranker_score", 0)), 4),
-                    "similarity":     round(float(c.get("similarity", 0)), 4),
-                })
-            yield f"data: {json.dumps({'type': 'sources', 'chunks': sources})}\n\n"
+            if body.use_rag:
+                for c in chunks:
+                    sources.append({
+                        "filename":       c.get("filename", ""),
+                        "chunk_number":   c.get("chunk_number", 0),
+                        "chunk_text":     c.get("chunk_text", "")[:500],
+                        "reranker_score": round(float(c.get("reranker_score", 0)), 4),
+                        "similarity":     round(float(c.get("similarity", 0)), 4),
+                    })
+                yield f"data: {json.dumps({'type': 'sources', 'chunks': sources})}\n\n"
 
-            if not chunks:
+            if not chunks and body.use_rag:
                 no_ctx = "I could not find this information in the uploaded documents."
                 yield f"data: {json.dumps({'type': 'token', 'text': no_ctx})}\n\n"
                 message_id = await run_sync(_save_messages, user["id"], body.session_id, body.question, no_ctx, [], history)
@@ -827,7 +832,7 @@ async def ask(body: AskRequest, user: dict = Depends(get_current_user)):
             # --- Step 2: Build prompt (sync, fast) ---
             def _build_prompt():
                 from services.llm_service import build_prompt
-                return build_prompt(body.question, chunks, history=history)
+                return build_prompt(body.question, chunks, history=history, use_rag=body.use_rag)
 
             prompt = await run_sync(_build_prompt)
 

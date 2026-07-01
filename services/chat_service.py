@@ -47,7 +47,9 @@ def ensure_chat_tables() -> None:
     create_sessions = """
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id         SERIAL PRIMARY KEY,
+            user_id    INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             title      TEXT        NOT NULL DEFAULT 'New Chat',
+            app_mode   VARCHAR(20) NOT NULL DEFAULT 'rag',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -77,24 +79,24 @@ def ensure_chat_tables() -> None:
 # Session management
 # ---------------------------------------------------------------------------
 
-def create_session(user_id: int, title: str = "New Chat") -> dict:
+def create_session(user_id: int, title: str = "New Chat", app_mode: str = "rag") -> dict:
     """
     Create a new chat session and return it.
 
     Returns:
-        dict with id, user_id, title, created_at, updated_at
+        dict with id, user_id, title, app_mode, created_at, updated_at
     """
     import psycopg2.extras
     from services.database_service import _get_connection
 
     query = """
-        INSERT INTO chat_sessions (user_id, title, created_at, updated_at)
-        VALUES (%s, %s, NOW(), NOW())
-        RETURNING id, user_id, title, created_at, updated_at;
+        INSERT INTO chat_sessions (user_id, title, app_mode, created_at, updated_at)
+        VALUES (%s, %s, %s, NOW(), NOW())
+        RETURNING id, user_id, title, app_mode, created_at, updated_at;
     """
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, (user_id, title))
+            cur.execute(query, (user_id, title, app_mode))
             row = dict(cur.fetchone())
 
     logger.info("Created chat session id=%d title='%s' user_id=%d", row["id"], row["title"], row["user_id"])
@@ -106,7 +108,7 @@ def get_all_sessions(user_id: int) -> list:
     Return all sessions ordered by most recently updated first.
 
     Returns:
-        List of dicts: id, user_id, title, created_at, updated_at, message_count
+        List of dicts: id, user_id, title, app_mode, created_at, updated_at, message_count
     """
     import psycopg2.extras
     from services.database_service import _get_connection
@@ -115,6 +117,7 @@ def get_all_sessions(user_id: int) -> list:
         SELECT
             s.id,
             s.title,
+            s.app_mode,
             s.created_at,
             s.updated_at,
             COUNT(m.id) AS message_count
@@ -138,7 +141,7 @@ def get_session(user_id: int, session_id: int) -> dict:
     with _get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE id = %s AND user_id = %s;",
+                "SELECT id, user_id, title, app_mode, created_at, updated_at FROM chat_sessions WHERE id = %s AND user_id = %s;",
                 (session_id, user_id)
             )
             row = cur.fetchone()

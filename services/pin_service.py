@@ -108,7 +108,8 @@ def get_pinned_answers(user_id: int) -> list:
                     m.sources,
                     m.created_at    AS message_created_at,
                     s.id            AS session_id,
-                    s.title         AS session_title
+                    s.title         AS session_title,
+                    s.app_mode      AS app_mode
                 FROM pinned_answers p
                 JOIN chat_messages  m ON m.id = p.message_id
                 JOIN chat_sessions  s ON s.id = m.session_id

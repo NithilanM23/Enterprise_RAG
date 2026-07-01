@@ -117,7 +117,7 @@ def _strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-def build_prompt(question: str, chunks: list, history: list = None) -> str:
+def build_prompt(question: str, chunks: list, history: list = None, use_rag: bool = True) -> str:
     """
     Construct the grounded prompt from retrieved chunks, optional conversation
     history, and the user question.
@@ -127,10 +127,34 @@ def build_prompt(question: str, chunks: list, history: list = None) -> str:
         chunks   : List of chunk dicts from retrieval_service.retrieve().
         history  : Optional list of previous messages for buffer memory.
                    Format: [{"role": "user"/"assistant", "content": str}, ...]
+        use_rag  : Boolean indicating whether to use context/RAG format.
 
     Returns:
         Formatted prompt string ready to send to the LLM.
     """
+    if not use_rag:
+        # Build standard LLM prompt without RAG context
+        history_block = ""
+        if history:
+            lines = []
+            for msg in history:
+                role_label = "User" if msg["role"] == "user" else "Assistant"
+                lines.append(f"{role_label}: {msg['content']}")
+            history_block = (
+                "\nConversation so far:\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+
+        prompt = (
+            "You are a helpful and intelligent AI assistant.\n\n"
+            + history_block
+            + "\nQuestion:\n"
+            + question
+            + "\n\nAnswer:"
+        )
+        return prompt
+
     if not chunks:
         context = "No relevant context found in the uploaded documents."
     else:

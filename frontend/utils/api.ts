@@ -100,7 +100,7 @@ export const categories = {
 
 export const sessions = {
   list:    () => request<any[]>('/api/sessions'),
-  create:  (title?: string) => request<any>('/api/sessions', { method: 'POST', body: JSON.stringify({ title: title || 'New Chat' }) }),
+  create:  (title?: string, app_mode: string = 'rag') => request<any>('/api/sessions', { method: 'POST', body: JSON.stringify({ title: title || 'New Chat', app_mode }) }),
   messages: (id: number)   => request<any[]>(`/api/sessions/${id}/messages`),
   rename:  (id: number, title: string) => request<any>(`/api/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   delete:  (id: number)    => request<any>(`/api/sessions/${id}`, { method: 'DELETE' }),
@@ -113,6 +113,7 @@ export function streamAsk(
   sessionId: number,
   question: string,
   documentIds: number[] | null,
+  use_rag: boolean,
   onEvent: (event: any) => void,
   onDone: () => void,
   onError: (msg: string) => void
@@ -127,7 +128,7 @@ export function streamAsk(
     fetch(`${API}/api/chat/ask`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ session_id: sessionId, question, document_ids: documentIds }),
+      body: JSON.stringify({ session_id: sessionId, question, document_ids: documentIds, use_rag }),
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok) {

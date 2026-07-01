@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { sessions as sessionsApi, streamAsk, saved as savedApi, documents as documentsApi } from '@/utils/api';
 import SourcePanel from '@/components/SourcePanel';
+import { useAppMode } from '../../context/AppModeContext';
 
 interface MessageUI {
   id?: number;
@@ -26,6 +27,7 @@ export default function ChatPage() {
   const searchParams = useSearchParams();
   const router      = useRouter();
   const sessionId   = Number(params.sessionId);
+  const { appMode } = useAppMode();
 
   const [messages,    setMessages]   = useState<MessageUI[]>([]);
   const [input,       setInput]      = useState('');
@@ -115,7 +117,7 @@ export default function ChatPage() {
     let currentSources: any[] = [];
 
     const ctrl = streamAsk(
-      sessionId, q, selectedDocIds,
+      sessionId, q, selectedDocIds, appMode === 'rag',
       // onEvent
       (evt) => {
         if (evt.type === 'routing') {
@@ -414,22 +416,23 @@ export default function ChatPage() {
                 ref={inputRef}
                 className="chat-input"
                 rows={1}
-                placeholder="Ask anything about your documents… (Enter to send, Shift+Enter for new line)"
+                placeholder={appMode === 'rag' ? "Ask anything about your documents… (Enter to send, Shift+Enter for new line)" : "Ask anything… (Enter to send, Shift+Enter for new line)"}
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
                 disabled={sending}
               />
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div style={{ position: 'relative' }}>
-                  <button 
-                    className={`chat-scope-btn ${selectedDocIds !== null ? 'active' : ''}`}
-                    onClick={() => setScopeExpanded(!scopeExpanded)}
-                    title={selectedDocIds ? `Searching ${selectedDocIds.length} docs` : 'Searching all docs'}
-                  >
-                    <Layers size={18} />
-                    {selectedDocIds && <div className="chat-scope-dot" />}
-                  </button>
+                {appMode === 'rag' && (
+                  <div style={{ position: 'relative' }}>
+                    <button 
+                      className={`chat-scope-btn ${selectedDocIds !== null ? 'active' : ''}`}
+                      onClick={() => setScopeExpanded(!scopeExpanded)}
+                      title={selectedDocIds ? `Searching ${selectedDocIds.length} docs` : 'Searching all docs'}
+                    >
+                      <Layers size={18} />
+                      {selectedDocIds && <div className="chat-scope-dot" />}
+                    </button>
                   
                   {scopeExpanded && (
                     <div className="chat-scope-dropdown">
@@ -467,6 +470,7 @@ export default function ChatPage() {
                     </div>
                   )}
                 </div>
+                )}
 
                 {sending ? (
                   <button className="chat-send-btn" onClick={stopStream} title="Stop generating" style={{ background: 'var(--error)' }}>

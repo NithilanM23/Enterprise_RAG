@@ -4,10 +4,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { Bookmark, BookmarkX, ExternalLink, FileText, MessageSquare } from 'lucide-react';
 import { saved as savedApi } from '@/utils/api';
 import Link from 'next/link';
+import { useAppMode } from '../context/AppModeContext';
 
 export default function SavedPage() {
   const [pins,  setPins]  = useState<any[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+  const { appMode } = useAppMode();
 
   const load = useCallback(async () => {
     try { setPins(await savedApi.list()); } catch {}
@@ -28,17 +30,19 @@ export default function SavedPage() {
     } catch {}
   };
 
+  const filteredPins = pins.filter(p => p.app_mode === appMode);
+
   return (
     <>
       {/* Topbar */}
       <div className="topbar">
         <Bookmark size={15} style={{ color: 'var(--primary)' }} />
         <span className="topbar-title">Saved Answers</span>
-        <span className="topbar-subtitle">{pins.length} saved</span>
+        <span className="topbar-subtitle">{filteredPins.length} saved</span>
       </div>
 
       <div className="page-content">
-        {pins.length === 0 ? (
+        {filteredPins.length === 0 ? (
           <div className="empty-state" style={{ marginTop: '15vh' }}>
             <div className="empty-icon"><Bookmark size={40} /></div>
             <div className="empty-title">No saved answers yet</div>
@@ -48,7 +52,7 @@ export default function SavedPage() {
             </div>
           </div>
         ) : (
-          pins.map(pin => (
+          filteredPins.map(pin => (
             <div key={pin.pin_id} className="card" style={{ marginBottom: 0 }}>
               {/* Session context */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>

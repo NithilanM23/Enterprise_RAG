@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { sessions as sessionsApi } from '@/utils/api';
 import CommandPalette from '@/components/CommandPalette';
+import { useAppMode } from './context/AppModeContext';
 
 import { Providers } from './providers';
 import { useSession, signOut } from 'next-auth/react';
@@ -22,6 +23,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { data: session, status } = useSession();
+  const { appMode, setAppMode } = useAppMode();
   const username = session?.user?.name || '';
 
   useEffect(() => {
@@ -53,7 +55,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
   const newChat = async () => {
     try {
-      const s = await sessionsApi.create();
+      const s = await sessionsApi.create('New Chat', appMode);
       await loadSessions();
       router.push(`/chat/${s.id}`);
     } catch { }
@@ -75,17 +77,20 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
   // Group sessions by time
   const now = Date.now();
-  const today = sessions.filter(s => now - new Date(s.updated_at).getTime() < 86400000);
-  const week = sessions.filter(s => {
+  const filteredSessions = sessions.filter(s => s.app_mode === appMode);
+  const today = filteredSessions.filter(s => now - new Date(s.updated_at).getTime() < 86400000);
+  const week = filteredSessions.filter(s => {
     const age = now - new Date(s.updated_at).getTime();
     return age >= 86400000 && age < 7 * 86400000;
   });
-  const older = sessions.filter(s => now - new Date(s.updated_at).getTime() >= 7 * 86400000);
+  const older = filteredSessions.filter(s => now - new Date(s.updated_at).getTime() >= 7 * 86400000);
 
-  const navItems = [
+  let navItems = appMode === 'rag' ? [
     { href: '/', icon: <Brain size={15} />, label: 'Dashboard' },
     { href: '/documents', icon: <FileText size={15} />, label: 'Documents' },
     { href: '/explorer', icon: <BarChart2 size={15} />, label: 'Data Explorer' },
+    { href: '/saved', icon: <Bookmark size={15} />, label: 'Saved' },
+  ] : [
     { href: '/saved', icon: <Bookmark size={15} />, label: 'Saved' },
   ];
 
@@ -131,6 +136,21 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           <div className="sidebar-logo-text">DICV LOCAL A.I</div>
         </div>
 
+        <div style={{ padding: '0 12px 12px 12px', display: 'flex', gap: '8px' }}>
+          <button 
+            style={{ flex: 1, padding: '6px', fontSize: '11px', borderRadius: '4px', background: appMode === 'rag' ? 'var(--primary)' : 'var(--surface-hi2)', color: appMode === 'rag' ? '#fff' : 'var(--text-sec)', border: 'none', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}
+            onClick={() => { setAppMode('rag'); router.push('/'); }}
+          >
+            RAG Mode
+          </button>
+          <button 
+            style={{ flex: 1, padding: '6px', fontSize: '11px', borderRadius: '4px', background: appMode === 'llm' ? 'var(--primary)' : 'var(--surface-hi2)', color: appMode === 'llm' ? '#fff' : 'var(--text-sec)', border: 'none', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}
+            onClick={() => { setAppMode('llm'); router.push('/'); }}
+          >
+            Local GPT
+          </button>
+        </div>
+
         <div className="sidebar-action-row">
           <button className="new-chat-btn" onClick={newChat}>
             <Plus size={14} /> New chat
@@ -160,7 +180,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
         {/* Sessions */}
         <div className="sidebar-sessions">
-          {sessions.length === 0 && (
+          {filteredSessions.length === 0 && (
             <div style={{ padding: '20px 8px', textAlign: 'center', color: 'var(--text-mute)', fontSize: 12 }}>
               No conversations yet
             </div>

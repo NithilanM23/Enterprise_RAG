@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Brain, FileText, MessageSquare, Zap, AlertCircle, ChevronRight } from 'lucide-react';
 import { health, sessions as sessionsApi, documents as docsApi } from '@/utils/api';
+import { useAppMode } from './context/AppModeContext';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export default function Dashboard() {
   const [sessionCount, setSessionCount] = useState(0);
   const [recentDocs,   setRecentDocs]   = useState<any[]>([]);
   const [question, setQuestion] = useState('');
+  const { appMode } = useAppMode();
 
   const load = useCallback(async () => {
     try {
@@ -36,7 +38,7 @@ export default function Dashboard() {
     e.preventDefault();
     if (!question.trim()) return;
     try {
-      const s = await sessionsApi.create(question.slice(0, 60));
+      const s = await sessionsApi.create(question.slice(0, 60), appMode);
       router.push(`/chat/${s.id}?q=${encodeURIComponent(question)}`);
     } catch {}
   };
@@ -55,6 +57,29 @@ export default function Dashboard() {
       boxShadow: `0 0 6px ${ok ? color : 'var(--error)'}`,
     }} />
   );
+
+  if (appMode === 'llm') {
+    return (
+      <div className="llm-dashboard-container">
+        <h1 className="llm-hero-title">How can I help you today?</h1>
+        <div className="llm-search-wrap">
+          <div className="llm-search-glow"></div>
+          <form className="llm-search-form" onSubmit={handleQuickAsk}>
+            <input
+              type="text"
+              className="llm-search-input"
+              placeholder="Ask anything..."
+              value={question}
+              onChange={e => setQuestion(e.target.value)}
+            />
+            <button type="submit" className="llm-search-btn" disabled={!question.trim()}>
+              <ChevronRight size={22} />
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="dashboard-container">

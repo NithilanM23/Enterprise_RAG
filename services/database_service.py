@@ -128,6 +128,8 @@ def initialize_database() -> None:
     from services.chat_service import ensure_chat_tables
     ensure_chat_tables()
 
+    _migrate_add_app_mode_column()
+
     # Metadata and Excel tables
     from services.metadata_service import ensure_metadata_table
     from services.excel_service import ensure_excel_table
@@ -218,6 +220,17 @@ def _migrate_multi_embedding() -> None:
             
             cur.execute("DROP INDEX IF EXISTS embeddings_hnsw_idx;")
     logger.debug("Migration: multi-embedding support ensured.")
+
+
+def _migrate_add_app_mode_column() -> None:
+    """Idempotent migration: add app_mode column to chat_sessions table."""
+    with _get_raw_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS app_mode VARCHAR(20) NOT NULL DEFAULT 'rag';
+            """)
+    logger.debug("Migration: app_mode column ensured on chat_sessions table.")
 
 
 def _ensure_pgvector_extension() -> None:

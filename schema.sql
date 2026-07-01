@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     id         SERIAL PRIMARY KEY,
     user_id    INTEGER     NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title      TEXT        NOT NULL DEFAULT 'New Chat',
+    app_mode   VARCHAR(20) NOT NULL DEFAULT 'rag',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
